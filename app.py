@@ -3,6 +3,7 @@ import string
 import random
 from datetime import datetime
 from flask_sqlalchemy import SQLAlchemy
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///urls.db'
@@ -33,6 +34,11 @@ def shorten_url():
     original_url = request.json.get('url')
     if not original_url:
         return jsonify({'error': 'Original URL is required'}), 400
+
+    # Validate the URL format
+    parsed_url = urlparse(original_url)
+    if not parsed_url.scheme or not parsed_url.netloc:
+        return jsonify({'error': 'Invalid URL format'}), 400
 
     # Check if the URL already exists
     existing_url = URL.query.filter_by(original_url=original_url).first()
@@ -79,6 +85,24 @@ def delete_short_code():
         db.session.delete(url)
         db.session.commit()
         return jsonify({'message': 'Short code deleted successfully'}), 200
+    else:
+        return jsonify({'error': 'Short code not found'}), 404
+
+@app.route('/edit', methods=['PUT'])
+def edit_short_code():
+    """Edit the original URL for a given short code."""
+    short_code = request.json.get('code')
+    new_url = request.json.get('url')
+
+    if not short_code or not new_url:
+        return jsonify({'error': 'Short code and new URL are required'}), 400
+
+    url_entry = URL.query.filter_by(short_code=short_code).first()
+
+    if url_entry:
+        url_entry.original_url = new_url
+        db.session.commit()
+        return jsonify({'message': 'URL updated successfully'}), 200
     else:
         return jsonify({'error': 'Short code not found'}), 404
 

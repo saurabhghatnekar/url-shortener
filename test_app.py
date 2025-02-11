@@ -86,5 +86,29 @@ class URLShortenerTestCase(unittest.TestCase):
         response = self.app.get('/delete?code=somecode')
         self.assertEqual(response.status_code, 405)
 
+    def test_edit_short_code(self):
+        # Create a short code to edit
+        original_url = 'https://example.com/edit'
+        response = self.app.post('/shorten', json={'url': original_url})
+        data = response.get_json()
+        short_code = data['short_code']
+
+        # Edit the short code to point to a new URL
+        new_url = 'https://example.com/edited'
+        edit_response = self.app.put('/edit', json={'code': short_code, 'url': new_url})
+        self.assertEqual(edit_response.status_code, 200)
+        self.assertEqual(edit_response.get_json()['message'], 'URL updated successfully')
+
+        # Verify that the short code now points to the new URL
+        redirect_response = self.app.get(f'/redirect?code={short_code}')
+        self.assertEqual(redirect_response.status_code, 302)
+        self.assertIn(new_url, redirect_response.location)
+
+    def test_edit_non_existent_short_code(self):
+        # Attempt to edit a non-existent short code
+        response = self.app.put('/edit', json={'code': 'nonexistent', 'url': 'https://example.com'})
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()['error'], 'Short code not found')
+
 if __name__ == '__main__':
     unittest.main()
