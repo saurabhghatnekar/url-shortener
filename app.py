@@ -1,19 +1,26 @@
 from flask import Flask, request, redirect, jsonify
 import string
 import random
-import sqlite3
 from datetime import datetime
+from flask_sqlalchemy import SQLAlchemy
 
 app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///urls.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Database setup
-conn = sqlite3.connect('urls.db', check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute('''CREATE TABLE IF NOT EXISTS urls (
-                    short_code TEXT PRIMARY KEY,
-                    original_url TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )''')
+db = SQLAlchemy(app)
+
+class URL(db.Model):
+    short_code = db.Column(db.String(6), primary_key=True)
+    original_url = db.Column(db.String, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<URL {self.short_code}>'
+
+# Initialize the database
+with app.app_context():
+    db.create_all()
 
 def generate_short_code(length=6):
     """Generate a random short code for URLs."""
@@ -37,14 +44,13 @@ def shorten_url():
 
         short_code = generate_short_code()
 
-        with sqlite3.connect('urls.db') as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT * FROM urls WHERE short_code = ?', (short_code,))
-            if cursor.fetchone():
-                return jsonify({'error': 'Short code already exists'}), 400
+        existing_url = URL.query.filter_by(short_code=short_code).first()
+        if existing_url:
+            return jsonify({'error': 'Short code already exists'}), 400
 
-            cursor.execute('INSERT INTO urls (short_code, original_url) VALUES (?, ?)', (short_code, original_url))
-            conn.commit()
+        new_url = URL(short_code=short_code, original_url=original_url)
+        db.session.add(new_url)
+        db.session.commit()
 
         response_data = {
             'short_code': short_code,
@@ -63,13 +69,10 @@ def redirect_to_url():
     if not short_code:
         return jsonify({'error': 'Short code is required'}), 400
 
-    with sqlite3.connect('urls.db') as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT original_url FROM urls WHERE short_code = ?', (short_code,))
-        result = cursor.fetchone()
+    url = URL.query.filter_by(short_code=short_code).first()
 
-    if result:
-        return redirect(result[0])
+    if url:
+        return redirect(url.original_url)
     else:
         return jsonify({'error': 'URL not found'}), 404
 
