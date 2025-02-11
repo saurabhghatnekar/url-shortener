@@ -29,43 +29,33 @@ def generate_short_code(length=6):
 
 @app.route('/shorten', methods=['POST'])
 def shorten_url():
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'No JSON data received'}), 400
+    """Shorten a given URL and return the short code."""
+    original_url = request.json.get('url')
+    if not original_url:
+        return jsonify({'error': 'Original URL is required'}), 400
 
-        if 'url' not in data:
-            return jsonify({'error': 'URL is required'}), 400
+    # Check if the URL already exists
+    existing_url = URL.query.filter_by(original_url=original_url).first()
+    if existing_url:
+        return jsonify({'short_code': existing_url.short_code, 'original_url': existing_url.original_url, 'short_url': f'http://localhost:5002/redirect?code={existing_url.short_code}'})
 
-        original_url = data['url']
+    short_code = generate_short_code()
 
-        if not original_url.startswith(('http://', 'https://')):
-            return jsonify({'error': 'Invalid URL format'}), 400
+    new_url = URL(short_code=short_code, original_url=original_url)
+    db.session.add(new_url)
+    db.session.commit()
 
-        short_code = generate_short_code()
-
-        existing_url = URL.query.filter_by(short_code=short_code).first()
-        if existing_url:
-            return jsonify({'error': 'Short code already exists'}), 400
-
-        new_url = URL(short_code=short_code, original_url=original_url)
-        db.session.add(new_url)
-        db.session.commit()
-
-        response_data = {
-            'short_code': short_code,
-            'original_url': original_url,
-            'short_url': f'http://localhost:5002/redirect?code={short_code}'
-        }
-        return jsonify(response_data)
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    response_data = {
+        'short_code': short_code,
+        'original_url': original_url,
+        'short_url': f'http://localhost:5002/redirect?code={short_code}'
+    }
+    return jsonify(response_data)
 
 @app.route('/redirect', methods=['GET'])
 def redirect_to_url():
+    """Redirect to the original URL based on the short code."""
     short_code = request.args.get('code')
-
     if not short_code:
         return jsonify({'error': 'Short code is required'}), 400
 
@@ -75,6 +65,22 @@ def redirect_to_url():
         return redirect(url.original_url)
     else:
         return jsonify({'error': 'URL not found'}), 404
+
+@app.route('/delete', methods=['DELETE'])
+def delete_short_code():
+    """Delete a short code from the database."""
+    short_code = request.args.get('code')
+    if not short_code:
+        return jsonify({'error': 'Short code is required'}), 400
+
+    url = URL.query.filter_by(short_code=short_code).first()
+
+    if url:
+        db.session.delete(url)
+        db.session.commit()
+        return jsonify({'message': 'Short code deleted successfully'}), 200
+    else:
+        return jsonify({'error': 'Short code not found'}), 404
 
 # Keep the connection open during requests
 @app.teardown_appcontext
