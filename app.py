@@ -6,7 +6,7 @@ from flask_sqlalchemy import SQLAlchemy
 from urllib.parse import urlparse
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///urls.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://neondb_owner:npg_8LqUgf2eYSid@ep-billowing-sunset-a5goac87-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
@@ -27,6 +27,10 @@ def generate_short_code(length=6):
     """Generate a random short code for URLs."""
     characters = string.ascii_letters + string.digits
     return ''.join(random.choice(characters) for _ in range(length))
+
+@app.route('/test', methods=['GET'])
+def test():
+    return 'Hello World!'
 
 @app.route('/shorten', methods=['POST'])
 def shorten_url():

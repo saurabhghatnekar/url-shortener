@@ -12,7 +12,7 @@ concurrency_levels = [50, 100, 200, 500, 1000]
 
 # Store results
 results = {}
-
+server_url = 'https://url-shortener-py-xvre5sskvq-de.a.run.app'
 # Run tests for each concurrency level
 for concurrency in concurrency_levels:
     logging.info(f"Running test with concurrency: {concurrency}")
@@ -24,7 +24,7 @@ for concurrency in concurrency_levels:
         "-m", "POST",
         "-H", "Content-Type: application/json",
         "-d", '{"url": "https://example.com"}',
-        "http://localhost:5002/shorten"
+        f"{server_url}/shorten"
     ]
     try:
         process = subprocess.run(command, capture_output=True, text=True, check=True)
@@ -73,7 +73,7 @@ plt.plot(concurrency, p95, label='p95')
 plt.plot(concurrency, p99, label='p99')
 plt.xlabel('Concurrency Level')
 plt.ylabel('Response Time (seconds)')
-plt.title('Latency Graph')
+plt.title('Latency Graph (with neon postgres) -' + server_url)
 plt.legend()
 plt.grid(True)
 plt.show()
