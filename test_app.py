@@ -64,5 +64,27 @@ class URLShortenerTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.get_json()['error'], 'Short code not found')
 
+    def test_invalid_url_format(self):
+        # Attempt to shorten an invalid URL
+        response = self.app.post('/shorten', json={'url': 'invalid-url'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['error'], 'Invalid URL format')
+
+    def test_missing_url_parameter(self):
+        # Attempt to shorten with missing URL parameter
+        response = self.app.post('/shorten', json={})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['error'], 'Original URL is required')
+
+    def test_redirect_with_invalid_method(self):
+        # Attempt to redirect using POST method
+        response = self.app.post('/redirect?code=somecode')
+        self.assertEqual(response.status_code, 405)
+
+    def test_delete_with_invalid_method(self):
+        # Attempt to delete using GET method
+        response = self.app.get('/delete?code=somecode')
+        self.assertEqual(response.status_code, 405)
+
 if __name__ == '__main__':
     unittest.main()
