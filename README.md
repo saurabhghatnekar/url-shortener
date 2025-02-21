@@ -1,6 +1,6 @@
 # URL Shortener Service
 
-A simple URL shortener service built with Python and Flask, using SQLite as the database.
+A simple URL shortener service built with Python and Flask, using PostgreSQL as the database. Features include URL analytics, real-time updates via Server-Sent Events (SSE), and click tracking.
 
 ## Prerequisites
 
@@ -61,34 +61,77 @@ pip install -r requirements.txt
 python app.py
 ```
 
-The server will start at http://localhost:5001
+The server will start at http://localhost:5002
 
-Note: The application uses SQLite as the database, which will be automatically created as `urls.db` in the project directory when you first run the application.
+Note: The application uses PostgreSQL as the database. Make sure to set up your database connection string in the environment variables.
 
 ## API Endpoints
 
-1. Shorten URL
+1. **Shorten URL**
    - **POST** `/shorten`
+   - Creates a new short code for a URL (allows multiple short codes for the same URL)
    - Request body: JSON with `url` field
    - Example:
      ```bash
      curl -X POST -H "Content-Type: application/json" \
           -d '{"url":"https://example.com"}' \
-          http://localhost:5001/shorten
+          http://localhost:5002/shorten
      ```
    - Response:
      ```json
      {
        "short_code": "abc123",
        "original_url": "https://example.com",
-       "short_url": "http://localhost:5001/redirect?code=abc123"
+       "short_url": "http://localhost:5002/redirect?code=abc123"
      }
      ```
 
-2. Redirect to Original URL
+2. **Redirect to Original URL**
    - **GET** `/redirect?code={code}`
-   - Example: http://localhost:5001/redirect?code=abc123
-   - Redirects to the original URL if found
+   - Redirects to the original URL and tracks click count and last access time
+   - Example: http://localhost:5002/redirect?code=abc123
+
+3. **Analytics Dashboard**
+   - **GET** `/analytics`
+   - Web interface showing real-time URL creation and analytics
+   - Updates automatically via Server-Sent Events
+
+4. **Most Popular URLs**
+   - **GET** `/analytics/popular`
+   - Returns top 10 most clicked URLs with click counts
+   - Example:
+     ```bash
+     curl http://localhost:5002/analytics/popular
+     ```
+   - Response:
+     ```json
+     [
+       {
+         "short_code": "abc123",
+         "original_url": "https://example.com",
+         "click_count": 42,
+         "last_accessed_at": "2025-02-21T14:30:00Z"
+       }
+     ]
+     ```
+
+5. **Most Shortened URLs**
+   - **GET** `/analytics/most-shortened`
+   - Returns top 10 URLs that have been shortened most frequently
+   - Example:
+     ```bash
+     curl http://localhost:5002/analytics/most-shortened
+     ```
+   - Response:
+     ```json
+     [
+       {
+         "original_url": "https://example.com",
+         "shortening_count": 5,
+         "short_codes": ["abc123", "def456", "ghi789"]
+       }
+     ]
+     ```
 
 ## Performance Testing
 
@@ -122,19 +165,42 @@ To test the performance of the application, you can use `oha` to simulate traffi
 
 These tests will help you assess the performance of your application under load.
 
-## Database
+## Database Schema
 
-The application uses SQLite with the following schema:
+The application uses PostgreSQL with the following schema:
 ```sql
 CREATE TABLE urls (
-    short_code VARCHAR(10) NOT NULL PRIMARY KEY,
-    original_url VARCHAR(2048) NOT NULL,
-    created_at DATETIME
+    short_code VARCHAR(6) NOT NULL PRIMARY KEY,
+    original_url TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    click_count INTEGER DEFAULT 0,
+    last_accessed_at TIMESTAMP
 );
 ```
 
-To view the database contents:
-```bash
-sqlite3 urls.db "SELECT * FROM urls;"
-  
-```
+Key features:
+- Multiple short codes can point to the same URL
+- Click tracking for each short code
+- Last access time tracking
+- Timestamps in UTC
+
+## Running Tests
+
+1. **Unit Tests**
+   ```bash
+   python -m pytest test_app.py
+   ```
+
+2. **Test Coverage**
+   ```bash
+   coverage run -m pytest test_app.py
+   coverage report
+   ```
+
+Key test cases:
+- URL shortening with duplicate URLs
+- Click tracking accuracy
+- Analytics endpoints
+- Real-time SSE updates
+- Error handling for invalid URLs
+- Database constraints and data integrity
