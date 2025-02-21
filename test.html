@@ -1,0 +1,39 @@
+
+
+<script>
+
+
+    var callback = function(formatted_number, mobile_number) {
+    
+    // formatted_number: number to display,in the same format as
+    
+    // 'phone_conversion_number'.
+    
+    // (in this case, '1-800-123-4567')
+    
+    // mobile_number: number formatted for use in a clickable link
+    
+    // with tel:-URI (in this case, '+18001234567')
+    
+    var e = $('.gtag').html();
+    console.log("element",e);
+    console.log("mobile number",mobile_number);
+    e.href = "tel:" + mobile_number;
+    
+    e.innerHTML = "";
+    
+    e.appendChild(document.createTextNode(formatted_number));
+    
+    };
+    var phn= $('.gtag').html();
+    console.log(phn);
+    gtag('config', 'AW-960805837/SU7XCOyynu8ZEM33ksoD', {
+    
+    'phone_conversion_number': "18003092299",
+    
+    'phone_conversion_callback': callback
+    
+    });
+    
+
+              </script>

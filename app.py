@@ -1,17 +1,42 @@
-from flask import Flask, request, redirect, jsonify
+from flask import Flask, request, redirect, jsonify, Response, render_template, copy_current_request_context
 import string
 import random
 from datetime import datetime
 from flask_sqlalchemy import SQLAlchemy
 from urllib.parse import urlparse
+from queue import Queue
+import json
+from threading import Event, Thread
+from time import sleep
+import logging
+
+import os
 
 app = Flask(__name__)
+app.template_folder = os.path.abspath(os.path.join(os.path.dirname(__file__), 'templates'))
 app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://neondb_owner:npg_8LqUgf2eYSid@ep-billowing-sunset-a5goac87-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Enable CORS for SSE
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    return response
+
+# Queue for SSE events
+url_events = Queue()
 
 db = SQLAlchemy(app)
 
 class URL(db.Model):
+    __tablename__ = 'urls'  # Explicitly set the table name
+    
     short_code = db.Column(db.String(6), primary_key=True)
     original_url = db.Column(db.String, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -28,16 +53,22 @@ def generate_short_code(length=6):
     characters = string.ascii_letters + string.digits
     return ''.join(random.choice(characters) for _ in range(length))
 
-@app.route('/test', methods=['GET'])
-def test():
-    return 'Hello World!'
+@app.route('/analytics')
+def analytics_page():
+    """Serve the analytics dashboard."""
+    logger.info(f'Template folder: {app.template_folder}')
+    try:
+        return render_template('analytics.html')
+    except Exception as e:
+        logger.error(f'Error rendering template: {str(e)}')
+        return jsonify({'error': 'Failed to load analytics page'}), 500
 
 @app.route('/shorten', methods=['POST'])
 def shorten_url():
     """Shorten a given URL and return the short code."""
     original_url = request.json.get('url')
-    if not original_url:
-        return jsonify({'error': 'Original URL is required'}), 400
+    if not original_url or not original_url.strip():
+        return jsonify({'error': 'URL cannot be empty'}), 400
 
     # Validate the URL format
     parsed_url = urlparse(original_url)
@@ -51,9 +82,23 @@ def shorten_url():
 
     short_code = generate_short_code()
 
-    new_url = URL(short_code=short_code, original_url=original_url)
-    db.session.add(new_url)
-    db.session.commit()
+    try:
+        new_url = URL(short_code=short_code, original_url=original_url)
+        db.session.add(new_url)
+        db.session.commit()
+
+        # Add event to queue for SSE
+        event_data = {
+            'short_code': short_code,
+            'original_url': original_url,
+            'created_at': new_url.created_at.isoformat()
+        }
+        url_events.put(event_data)
+        app.logger.info(f'Added event to queue: {event_data}')
+    except Exception as e:
+        app.logger.error(f'Error in shorten_url: {str(e)}')
+        db.session.rollback()
+        raise
 
     response_data = {
         'short_code': short_code,
@@ -114,6 +159,75 @@ def edit_short_code():
 @app.teardown_appcontext
 def close_connection(exception):
     pass
+
+@app.route('/analytics/stream')
+def stream_urls():
+    """Stream URL creation events using Server-Sent Events."""
+    @copy_current_request_context
+    def event_stream():
+        client_queue = Queue()
+        
+        def queue_worker():
+            while True:
+                try:
+                    # Get event from the main queue and put it in client queue
+                    event = url_events.get()
+                    client_queue.put(event)
+                except Exception as e:
+                    logger.error(f'Queue worker error: {str(e)}')
+                    break
+        
+        # Start worker thread for this client
+        worker = Thread(target=queue_worker)
+        worker.daemon = True
+        worker.start()
+        
+        try:
+            while True:
+                # Send heartbeat every 15 seconds
+                for _ in range(15):
+                    try:
+                        # Check for new events
+                        event_data = client_queue.get_nowait()
+                        logger.info(f'Sending event to client: {event_data}')
+                        yield f'data: {json.dumps(event_data)}\n\n'
+                    except Exception:
+                        sleep(1)
+                        
+                yield ': heartbeat\n\n'
+        except GeneratorExit:
+            logger.info('Client disconnected')
+    
+    return Response(
+        event_stream(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+            'Access-Control-Allow-Origin': '*'
+        }
+    )
+
+@app.route('/analytics/latest')
+def get_latest_urls():
+    """Get the last 10 shortened URLs."""
+    try:
+        latest_urls = URL.query.order_by(URL.created_at.desc()).limit(10).all()
+        app.logger.info(f'Found {len(latest_urls)} URLs')
+        
+        result = [
+            {
+                'short_code': url.short_code,
+                'original_url': url.original_url,
+                'created_at': url.created_at.isoformat() if url.created_at else None
+            } for url in latest_urls
+        ]
+        
+        return jsonify(result)
+    except Exception as e:
+        app.logger.error(f'Error fetching latest URLs: {str(e)}')
+        return jsonify({'error': 'Failed to fetch latest URLs'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5002)

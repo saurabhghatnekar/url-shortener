@@ -74,7 +74,18 @@ class URLShortenerTestCase(unittest.TestCase):
         # Attempt to shorten with missing URL parameter
         response = self.app.post('/shorten', json={})
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.get_json()['error'], 'Original URL is required')
+        self.assertEqual(response.get_json()['error'], 'URL cannot be empty')
+
+    def test_empty_url(self):
+        # Test empty URL string
+        response = self.app.post('/shorten', json={'url': ''})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['error'], 'URL cannot be empty')
+
+        # Test URL with only whitespace
+        response = self.app.post('/shorten', json={'url': '   \n\t  '})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['error'], 'URL cannot be empty')
 
     def test_redirect_with_invalid_method(self):
         # Attempt to redirect using POST method
