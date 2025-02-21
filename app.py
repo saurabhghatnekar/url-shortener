@@ -79,12 +79,12 @@ def shorten_url():
     if not parsed_url.scheme or not parsed_url.netloc:
         return jsonify({'error': 'Invalid URL format'}), 400
 
-    # Check if the URL already exists
-    existing_url = URL.query.filter_by(original_url=original_url).first()
-    if existing_url:
-        return jsonify({'short_code': existing_url.short_code, 'original_url': existing_url.original_url, 'short_url': f'http://localhost:5002/redirect?code={existing_url.short_code}'})
-
+    # Generate a new short code for every URL, even if it already exists
     short_code = generate_short_code()
+    while URL.query.filter_by(short_code=short_code).first():
+        short_code = generate_short_code()
+
+
 
     try:
         new_url = URL(short_code=short_code, original_url=original_url)
@@ -258,6 +258,36 @@ def get_popular_urls():
     except Exception as e:
         logger.error(f'Error fetching popular URLs: {str(e)}')
         return jsonify({'error': 'Failed to fetch popular URLs'}), 500
+
+@app.route('/analytics/most-shortened')
+def get_most_shortened_urls():
+    """Get the top 10 most shortened URLs."""
+    try:
+        # Use SQLAlchemy to group by original_url and count occurrences
+        most_shortened = db.session.query(
+            URL.original_url,
+            db.func.count(URL.short_code).label('shortening_count')
+        ).group_by(
+            URL.original_url
+        ).order_by(
+            db.desc('shortening_count')
+        ).limit(10).all()
+
+        return jsonify([
+            {
+                'original_url': url[0],
+                'shortening_count': url[1],
+                # Get all short codes for this URL
+                'short_codes': [
+                    code[0] for code in db.session.query(URL.short_code)
+                    .filter(URL.original_url == url[0])
+                    .all()
+                ]
+            } for url in most_shortened
+        ])
+    except Exception as e:
+        logger.error(f'Error fetching most shortened URLs: {str(e)}')
+        return jsonify({'error': 'Failed to fetch most shortened URLs'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5002)
