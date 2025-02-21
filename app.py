@@ -3,6 +3,7 @@ import string
 import random
 from datetime import datetime
 from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
 from urllib.parse import urlparse
 from queue import Queue
 import json
@@ -16,10 +17,13 @@ app = Flask(__name__)
 app.template_folder = os.path.abspath(os.path.join(os.path.dirname(__file__), 'templates'))
 app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://neondb_owner:npg_8LqUgf2eYSid@ep-billowing-sunset-a5goac87-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+db = SQLAlchemy(app)
+
+# Initialize Flask-Migrate
+migrate = Migrate(app, db)
 
 # Enable CORS for SSE
 @app.after_request
@@ -32,14 +36,14 @@ def after_request(response):
 # Queue for SSE events
 url_events = Queue()
 
-db = SQLAlchemy(app)
-
 class URL(db.Model):
     __tablename__ = 'urls'  # Explicitly set the table name
     
     short_code = db.Column(db.String(6), primary_key=True)
     original_url = db.Column(db.String, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    click_count = db.Column(db.Integer, default=0)
+    last_accessed_at = db.Column(db.DateTime, nullable=True)
 
     def __repr__(self):
         return f'<URL {self.short_code}>'
@@ -117,6 +121,10 @@ def redirect_to_url():
     url = URL.query.filter_by(short_code=short_code).first()
 
     if url:
+        # Increment click count and update last access time
+        url.click_count = (url.click_count or 0) + 1
+        url.last_accessed_at = datetime.utcnow()
+        db.session.commit()
         return redirect(url.original_url)
     else:
         return jsonify({'error': 'URL not found'}), 404
@@ -228,6 +236,28 @@ def get_latest_urls():
     except Exception as e:
         app.logger.error(f'Error fetching latest URLs: {str(e)}')
         return jsonify({'error': 'Failed to fetch latest URLs'}), 500
+
+@app.route('/analytics/popular')
+def get_popular_urls():
+    """Get the top 10 most clicked URLs, breaking ties by last access time."""
+    try:
+        popular_urls = URL.query.order_by(
+            URL.click_count.desc(),
+            URL.last_accessed_at.desc().nullslast()
+        ).limit(10).all()
+
+        return jsonify([
+            {
+                'short_code': url.short_code,
+                'original_url': url.original_url,
+                'click_count': url.click_count or 0,
+                'last_accessed_at': url.last_accessed_at.isoformat() if url.last_accessed_at else None,
+                'created_at': url.created_at.isoformat() if url.created_at else None
+            } for url in popular_urls
+        ])
+    except Exception as e:
+        logger.error(f'Error fetching popular URLs: {str(e)}')
+        return jsonify({'error': 'Failed to fetch popular URLs'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5002)
