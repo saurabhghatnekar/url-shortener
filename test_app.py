@@ -8,14 +8,15 @@ class URLShortenerTestCase(unittest.TestCase):
 
         # Create a new database for testing
         with app.app_context():
-            db.create_all()
+            db.drop_all()  # Drop all tables first
+            db.create_all()  # Create fresh tables
 
     def tearDown(self):
         # Drop the database after testing
         with app.app_context():
             db.drop_all()
 
-    def test_duplicate_url(self):
+    def test_multiple_codes_for_same_url(self):
         original_url = 'https://example.com/'
 
         # First request
@@ -28,8 +29,18 @@ class URLShortenerTestCase(unittest.TestCase):
         data2 = response2.get_json()
         short_code2 = data2['short_code']
 
-        # Assert that the same short code is returned
-        self.assertEqual(short_code1, short_code2)
+        # Assert that different short codes are returned
+        self.assertNotEqual(short_code1, short_code2)
+
+        # Check most-shortened analytics
+        response = self.app.get('/analytics/most-shortened')
+        data = response.get_json()
+        
+        # Verify the URL appears in most-shortened with count 2
+        self.assertEqual(data[0]['original_url'], original_url)
+        self.assertEqual(data[0]['shortening_count'], 2)
+        self.assertIn(short_code1, data[0]['short_codes'])
+        self.assertIn(short_code2, data[0]['short_codes'])
 
     def test_non_existent_short_code(self):
         # Attempt to fetch a non-existent short code
@@ -120,6 +131,65 @@ class URLShortenerTestCase(unittest.TestCase):
         response = self.app.put('/edit', json={'code': 'nonexistent', 'url': 'https://example.com'})
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.get_json()['error'], 'Short code not found')
+
+    def test_click_tracking(self):
+        # Create a short URL
+        original_url = 'https://example.com/track'
+        response = self.app.post('/shorten', json={'url': original_url})
+        data = response.get_json()
+        short_code = data['short_code']
+
+        # Click the URL multiple times
+        for _ in range(3):
+            redirect_response = self.app.get(f'/redirect?code={short_code}')
+            self.assertEqual(redirect_response.status_code, 302)
+
+        # Check popular URLs analytics
+        response = self.app.get('/analytics/popular')
+        data = response.get_json()
+
+        # Verify click count and last access time
+        url_data = next(url for url in data if url['short_code'] == short_code)
+        self.assertEqual(url_data['click_count'], 3)
+        self.assertIsNotNone(url_data['last_accessed_at'])
+
+    def test_analytics_endpoints(self):
+        # Create multiple URLs
+        urls = [
+            'https://example.com/1',
+            'https://example.com/2',
+            'https://example.com/1'  # Duplicate URL
+        ]
+        short_codes = []
+
+        for url in urls:
+            response = self.app.post('/shorten', json={'url': url})
+            data = response.get_json()
+            short_codes.append(data['short_code'])
+
+        # Click some URLs
+        self.app.get(f'/redirect?code={short_codes[0]}')
+        self.app.get(f'/redirect?code={short_codes[0]}')
+        self.app.get(f'/redirect?code={short_codes[1]}')
+
+        # Test /analytics/popular
+        popular_response = self.app.get('/analytics/popular')
+        popular_data = popular_response.get_json()
+        most_clicked = max(popular_data, key=lambda x: x['click_count'])
+        self.assertEqual(most_clicked['short_code'], short_codes[0])
+        self.assertEqual(most_clicked['click_count'], 2)
+
+        # Test /analytics/most-shortened
+        shortened_response = self.app.get('/analytics/most-shortened')
+        shortened_data = shortened_response.get_json()
+        self.assertEqual(shortened_data[0]['original_url'], 'https://example.com/1')
+        self.assertEqual(shortened_data[0]['shortening_count'], 2)
+
+        # Test /analytics/latest
+        latest_response = self.app.get('/analytics/latest')
+        latest_data = latest_response.get_json()
+        self.assertEqual(len(latest_data), 3)
+        self.assertEqual(latest_data[0]['short_code'], short_codes[2])
 
 if __name__ == '__main__':
     unittest.main()
