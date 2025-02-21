@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>URL Shortener Analytics</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background-color: #f5f5f5;
+        }
+        .url-list {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>URL Shortener Analytics</h1>
+    <div class="url-list">
+        <h2>Latest Shortened URLs</h2>
+        <table id="urlTable">
+            <thead>
+                <tr>
+                    <th>Short Code</th>
+                    <th>Original URL</th>
+                    <th>Created At</th>
+                </tr>
+            </thead>
+            <tbody id="urlList"></tbody>
+        </table>
+    </div>
+
+    <script>
+        // Function to add a new URL to the table
+        function addUrlToTable(url) {
+            const tbody = document.getElementById('urlList');
+            const row = document.createElement('tr');
+            
+            const shortCode = document.createElement('td');
+            shortCode.textContent = url.short_code;
+            
+            const originalUrl = document.createElement('td');
+            originalUrl.textContent = url.original_url;
+            
+            const createdAt = document.createElement('td');
+            createdAt.textContent = new Date(url.created_at).toLocaleString();
+            
+            row.appendChild(shortCode);
+            row.appendChild(originalUrl);
+            row.appendChild(createdAt);
+            
+            tbody.insertBefore(row, tbody.firstChild);
+            
+            // Keep only the last 10 rows
+            while (tbody.children.length > 10) {
+                tbody.removeChild(tbody.lastChild);
+            }
+        }
+
+        // Load initial data
+        fetch('/analytics/latest')
+            .then(response => response.json())
+            .then(urls => {
+                urls.forEach(url => addUrlToTable(url));
+            });
+
+        let eventSource = null;
+
+        // Function to connect to SSE stream
+        function connectEventSource() {
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            eventSource = new EventSource('/analytics/stream');
+            console.log('Connecting to event stream...');
+
+            eventSource.onopen = function() {
+                console.log('Connected to event stream');
+                updateConnectionStatus('Connected', 'green');
+            };
+
+            eventSource.onmessage = function(event) {
+                console.log('Received event:', event.data);
+                try {
+                    const url = JSON.parse(event.data);
+                    console.log('Processing URL:', url);
+                    addUrlToTable(url);
+                } catch (e) {
+                    console.error('Error processing event:', e);
+                }
+            };
+
+            eventSource.onerror = function(error) {
+                console.error('EventSource failed:', error);
+                updateConnectionStatus('Disconnected - Retrying...', 'red');
+                eventSource.close();
+                setTimeout(connectEventSource, 5000);
+            };
+        }
+
+        function updateConnectionStatus(status, color) {
+            const statusDiv = document.getElementById('connectionStatus');
+            if (statusDiv) {
+                statusDiv.textContent = status;
+                statusDiv.style.color = color;
+            }
+        }
+
+        // Add connection status display
+        const statusContainer = document.createElement('div');
+        statusContainer.innerHTML = `
+            <div style="position: fixed; top: 10px; right: 10px; padding: 10px; background: #f5f5f5; border-radius: 5px;">
+                Connection Status: <span id="connectionStatus" style="color: orange;">Connecting...</span>
+            </div>
+        `;
+        document.body.appendChild(statusContainer);
+
+        // Start the connection
+        connectEventSource();
+
+        // Reconnect when the page becomes visible again
+        document.addEventListener('visibilitychange', function() {
+            if (document.visibilityState === 'visible') {
+                console.log('Page became visible, reconnecting...');
+                connectEventSource();
+            }
+        });
+    </script>
+</body>
+</html>
