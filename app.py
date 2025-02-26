@@ -36,6 +36,23 @@ def after_request(response):
 # Queue for SSE events
 url_events = Queue()
 
+def generate_api_key(length=32):
+    """Generate a random API key."""
+    characters = string.ascii_letters + string.digits
+    return ''.join(random.choice(characters) for _ in range(length))
+
+class User(db.Model):
+    __tablename__ = 'users'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    email = db.Column(db.String, unique=True, nullable=False)
+    name = db.Column(db.String, nullable=True)
+    api_key = db.Column(db.String(32), unique=True, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<User {self.email}>'
+
 class URL(db.Model):
     __tablename__ = 'urls'  # Explicitly set the table name
     
@@ -44,6 +61,10 @@ class URL(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     click_count = db.Column(db.Integer, default=0)
     last_accessed_at = db.Column(db.DateTime, nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    
+    # Define the relationship with the User model
+    user = db.relationship('User', backref=db.backref('urls', lazy=True))
 
     def __repr__(self):
         return f'<URL {self.short_code}>'
@@ -51,11 +72,31 @@ class URL(db.Model):
 # Initialize the database
 with app.app_context():
     db.create_all()
+    
+    # Create sample users if they don't exist
+    if User.query.count() == 0:
+        sample_users = [
+            User(email='user1@example.com', name='User One', api_key=generate_api_key()),
+            User(email='user2@example.com', name='User Two', api_key=generate_api_key()),
+            User(email='user3@example.com', name='User Three', api_key=generate_api_key())
+        ]
+        db.session.add_all(sample_users)
+        db.session.commit()
+        
+        # Log the API keys for the client
+        for user in sample_users:
+            app.logger.info(f'Created user: {user.email} with API key: {user.api_key}')
 
 def generate_short_code(length=6):
     """Generate a random short code for URLs."""
     characters = string.ascii_letters + string.digits
     return ''.join(random.choice(characters) for _ in range(length))
+
+def get_user_from_api_key(api_key):
+    """Get user from API key."""
+    if not api_key:
+        return None
+    return User.query.filter_by(api_key=api_key).first()
 
 @app.route('/analytics')
 def analytics_page():
@@ -70,6 +111,13 @@ def analytics_page():
 @app.route('/shorten', methods=['POST'])
 def shorten_url():
     """Shorten a given URL and return the short code."""
+    # Get API key from request headers
+    api_key = request.headers.get('X-API-Key')
+    user = get_user_from_api_key(api_key)
+    
+    if not user:
+        return jsonify({'error': 'Invalid or missing API key'}), 401
+        
     original_url = request.json.get('url')
     if not original_url or not original_url.strip():
         return jsonify({'error': 'URL cannot be empty'}), 400
@@ -84,10 +132,8 @@ def shorten_url():
     while URL.query.filter_by(short_code=short_code).first():
         short_code = generate_short_code()
 
-
-
     try:
-        new_url = URL(short_code=short_code, original_url=original_url)
+        new_url = URL(short_code=short_code, original_url=original_url, user_id=user.id)
         db.session.add(new_url)
         db.session.commit()
 
@@ -132,22 +178,40 @@ def redirect_to_url():
 @app.route('/delete', methods=['DELETE'])
 def delete_short_code():
     """Delete a short code from the database."""
+    # Get API key from request headers
+    api_key = request.headers.get('X-API-Key')
+    user = get_user_from_api_key(api_key)
+    
+    if not user:
+        return jsonify({'error': 'Invalid or missing API key'}), 401
+        
     short_code = request.args.get('code')
     if not short_code:
         return jsonify({'error': 'Short code is required'}), 400
 
     url = URL.query.filter_by(short_code=short_code).first()
 
-    if url:
-        db.session.delete(url)
-        db.session.commit()
-        return jsonify({'message': 'Short code deleted successfully'}), 200
-    else:
+    if not url:
         return jsonify({'error': 'Short code not found'}), 404
+        
+    # Check if the user is the owner of the URL
+    if url.user_id != user.id:
+        return jsonify({'error': 'You do not have permission to delete this URL'}), 403
+
+    db.session.delete(url)
+    db.session.commit()
+    return jsonify({'message': 'Short code deleted successfully'}), 200
 
 @app.route('/edit', methods=['PUT'])
 def edit_short_code():
     """Edit the original URL for a given short code."""
+    # Get API key from request headers
+    api_key = request.headers.get('X-API-Key')
+    user = get_user_from_api_key(api_key)
+    
+    if not user:
+        return jsonify({'error': 'Invalid or missing API key'}), 401
+        
     short_code = request.json.get('code')
     new_url = request.json.get('url')
 
@@ -156,17 +220,16 @@ def edit_short_code():
 
     url_entry = URL.query.filter_by(short_code=short_code).first()
 
-    if url_entry:
-        url_entry.original_url = new_url
-        db.session.commit()
-        return jsonify({'message': 'URL updated successfully'}), 200
-    else:
+    if not url_entry:
         return jsonify({'error': 'Short code not found'}), 404
+        
+    # Check if the user is the owner of the URL
+    if url_entry.user_id != user.id:
+        return jsonify({'error': 'You do not have permission to edit this URL'}), 403
 
-# Keep the connection open during requests
-@app.teardown_appcontext
-def close_connection(exception):
-    pass
+    url_entry.original_url = new_url
+    db.session.commit()
+    return jsonify({'message': 'URL updated successfully'}), 200
 
 @app.route('/analytics/stream')
 def stream_urls():
@@ -288,6 +351,11 @@ def get_most_shortened_urls():
     except Exception as e:
         logger.error(f'Error fetching most shortened URLs: {str(e)}')
         return jsonify({'error': 'Failed to fetch most shortened URLs'}), 500
+
+# Keep the connection open during requests
+@app.teardown_appcontext
+def close_connection(exception):
+    pass
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5002)
