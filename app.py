@@ -62,6 +62,8 @@ class URL(db.Model):
     click_count = db.Column(db.Integer, default=0)
     last_accessed_at = db.Column(db.DateTime, nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    is_deleted = db.Column(db.Boolean, default=False)
+    deleted_at = db.Column(db.DateTime, nullable=True)
     
     # Define the relationship with the User model
     user = db.relationship('User', backref=db.backref('urls', lazy=True))
@@ -166,7 +168,7 @@ def redirect_to_url():
 
     url = URL.query.filter_by(short_code=short_code).first()
 
-    if url:
+    if url and not url.is_deleted:
         # Increment click count and update last access time
         url.click_count = (url.click_count or 0) + 1
         url.last_accessed_at = datetime.utcnow()
@@ -198,7 +200,8 @@ def delete_short_code():
     if url.user_id != user.id:
         return jsonify({'error': 'You do not have permission to delete this URL'}), 403
 
-    db.session.delete(url)
+    url.is_deleted = True
+    url.deleted_at = datetime.utcnow()
     db.session.commit()
     return jsonify({'message': 'Short code deleted successfully'}), 200
 
@@ -284,7 +287,7 @@ def stream_urls():
 def get_latest_urls():
     """Get the last 10 shortened URLs."""
     try:
-        latest_urls = URL.query.order_by(URL.created_at.desc()).limit(10).all()
+        latest_urls = URL.query.filter_by(is_deleted=False).order_by(URL.created_at.desc()).limit(10).all()
         app.logger.info(f'Found {len(latest_urls)} URLs')
         
         result = [
@@ -304,7 +307,7 @@ def get_latest_urls():
 def get_popular_urls():
     """Get the top 10 most clicked URLs, breaking ties by last access time."""
     try:
-        popular_urls = URL.query.order_by(
+        popular_urls = URL.query.filter_by(is_deleted=False).order_by(
             URL.click_count.desc(),
             URL.last_accessed_at.desc().nullslast()
         ).limit(10).all()
@@ -330,7 +333,7 @@ def get_most_shortened_urls():
         most_shortened = db.session.query(
             URL.original_url,
             db.func.count(URL.short_code).label('shortening_count')
-        ).group_by(
+        ).filter_by(is_deleted=False).group_by(
             URL.original_url
         ).order_by(
             db.desc('shortening_count')
@@ -344,6 +347,7 @@ def get_most_shortened_urls():
                 'short_codes': [
                     code[0] for code in db.session.query(URL.short_code)
                     .filter(URL.original_url == url[0])
+                    .filter_by(is_deleted=False)
                     .all()
                 ]
             } for url in most_shortened
