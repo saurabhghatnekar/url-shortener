@@ -67,7 +67,7 @@ class URLShortenerTestCase(unittest.TestCase):
         self.assertEqual(data['error'], 'URL not found')
 
     def test_delete_short_code(self):
-        # Create a short code to delete
+        # Create a short URL to delete
         original_url = 'https://example.com/delete'
         response = self.app.post('/shorten', json={'url': original_url}, headers=self.headers)
         data = response.get_json()
@@ -78,7 +78,14 @@ class URLShortenerTestCase(unittest.TestCase):
         self.assertEqual(delete_response.status_code, 200)
         self.assertEqual(delete_response.get_json()['message'], 'Short code deleted successfully')
 
-        # Verify that the short code no longer exists
+        # Verify that the short code is soft deleted (still exists in DB but marked as deleted)
+        with app.app_context():
+            url = URL.query.filter_by(short_code=short_code).first()
+            self.assertIsNotNone(url)
+            self.assertTrue(url.is_deleted)
+            self.assertIsNotNone(url.deleted_at)
+
+        # Verify that the short code can't be accessed
         redirect_response = self.app.get(f'/redirect?code={short_code}')
         self.assertEqual(redirect_response.status_code, 404)
 
