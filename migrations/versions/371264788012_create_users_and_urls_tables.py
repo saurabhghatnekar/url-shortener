@@ -41,7 +41,16 @@ def upgrade():
         sa.PrimaryKeyConstraint('short_code')
     )
 
-
+    # Create api_keys table
+    op.create_table('api_keys',
+        sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column('user_id', sa.Integer(), nullable=False),
+        sa.Column('key', sa.String(length=32), nullable=False),
+        sa.Column('created_at', sa.DateTime(), nullable=True),
+        sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
+        sa.PrimaryKeyConstraint('id')
+    )
+    
 def downgrade():
     # Drop tables in reverse order
     op.drop_table('urls')

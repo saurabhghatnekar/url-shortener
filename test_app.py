@@ -1,5 +1,5 @@
 import unittest
-from app import app, db, URL, User, generate_api_key
+from app import app, db, URL, User, APIKey, generate_api_key, encrypt_api_key, decrypt_api_key
 
 class URLShortenerTestCase(unittest.TestCase):
     def setUp(self):
@@ -12,16 +12,25 @@ class URLShortenerTestCase(unittest.TestCase):
             db.create_all()  # Create fresh tables
             
             # Create a test user
-            self.test_user = User(
+            test_user = User(
                 email='test@example.com',
-                name='Test User',
-                api_key=generate_api_key()
+                name='Test User'
             )
-            db.session.add(self.test_user)
+            db.session.add(test_user)
+            db.session.flush()  # Flush to get the user ID
+            
+            # Store the user ID for tests
+            self.test_user_id = test_user.id
+            
+            # Create an API key for the test user
+            api_key_value = generate_api_key()
+            test_api_key = APIKey(user_id=self.test_user_id)
+            test_api_key.key = api_key_value
+            db.session.add(test_api_key)
             db.session.commit()
             
             # Store the API key for tests
-            self.api_key = self.test_user.api_key
+            self.api_key = api_key_value
             self.headers = {'X-API-Key': self.api_key}
 
     def tearDown(self):
@@ -229,12 +238,17 @@ class URLShortenerTestCase(unittest.TestCase):
         with app.app_context():
             second_user = User(
                 email='second@example.com',
-                name='Second User',
-                api_key=generate_api_key()
+                name='Second User'
             )
             db.session.add(second_user)
+            db.session.flush()
+            
+            # Create API key for second user
+            second_api_key_obj = APIKey(user_id=second_user.id)
+            second_api_key_obj.key = generate_api_key()
+            db.session.add(second_api_key_obj) 
             db.session.commit()
-            second_api_key = second_user.api_key
+            second_api_key = second_api_key_obj.key
             
         # Create a URL with the first user
         response = self.app.post('/shorten', json={'url': 'https://example.com/unauthorized'}, headers=self.headers)
@@ -252,12 +266,17 @@ class URLShortenerTestCase(unittest.TestCase):
         with app.app_context():
             second_user = User(
                 email='second@example.com',
-                name='Second User',
-                api_key=generate_api_key()
+                name='Second User'
             )
             db.session.add(second_user)
+            db.session.flush()
+            
+            # Create API key for second user
+            second_api_key_obj = APIKey(user_id=second_user.id)
+            second_api_key_obj.key = generate_api_key()
+            db.session.add(second_api_key_obj)
             db.session.commit()
-            second_api_key = second_user.api_key
+            second_api_key = second_api_key_obj.key
             
         # Create a URL with the first user
         response = self.app.post('/shorten', json={'url': 'https://example.com/unauthorized'}, headers=self.headers)
@@ -269,6 +288,106 @@ class URLShortenerTestCase(unittest.TestCase):
         edit_response = self.app.put('/edit', json={'code': short_code, 'url': 'https://example.com/edited'}, headers=headers)
         self.assertEqual(edit_response.status_code, 403)
         self.assertEqual(edit_response.get_json()['error'], 'You do not have permission to edit this URL')
+
+    def test_api_key_encryption(self):
+        """Test that API keys are properly encrypted and decrypted."""
+        with app.app_context():
+            # Generate a new API key
+            plain_key = generate_api_key()
+            
+            # Encrypt the key
+            encrypted_key = encrypt_api_key(plain_key)
+            
+            # Verify that the encrypted key is different from the plain key
+            self.assertNotEqual(plain_key, encrypted_key)
+            
+            # Decrypt the key and verify it matches the original
+            decrypted_key = decrypt_api_key(encrypted_key)
+            self.assertEqual(plain_key, decrypted_key)
+            
+            # Test the APIKey model's property
+            api_key = APIKey(user_id=self.test_user_id)
+            api_key.key = plain_key
+            
+            # Verify that the encrypted_key attribute contains binary data
+            self.assertIsInstance(api_key.encrypted_key, bytes)
+            
+            # Verify that the key property returns the decrypted key
+            self.assertEqual(api_key.key, plain_key)
+    
+    def test_create_user_endpoint(self):
+        """Test the user creation endpoint."""
+        # Create a new user
+        response = self.app.post('/users', json={
+            'email': 'newuser@example.com',
+            'name': 'New User'
+        })
+        
+        # Verify the response
+        self.assertEqual(response.status_code, 201)
+        data = response.get_json()
+        self.assertEqual(data['message'], 'User created successfully')
+        self.assertEqual(data['user']['email'], 'newuser@example.com')
+        self.assertEqual(data['user']['name'], 'New User')
+        self.assertIsNotNone(data['user']['api_key'])
+        
+        # Verify the user was created in the database
+        with app.app_context():
+            user = User.query.filter_by(email='newuser@example.com').first()
+            self.assertIsNotNone(user)
+            self.assertEqual(user.name, 'New User')
+            
+            # Verify the API key was created
+            api_key = APIKey.query.filter_by(user_id=user.id).first()
+            self.assertIsNotNone(api_key)
+            
+            # Verify the API key works
+            headers = {'X-API-Key': data['user']['api_key']}
+            response = self.app.post('/shorten', json={'url': 'https://example.com/newuser'}, headers=headers)
+            self.assertEqual(response.status_code, 200)
+    
+    def test_create_user_with_duplicate_email(self):
+        """Test creating a user with an email that already exists."""
+        # Try to create a user with the same email as the test user
+        response = self.app.post('/users', json={
+            'email': 'test@example.com',
+            'name': 'Duplicate User'
+        })
+        
+        # Verify the response
+        self.assertEqual(response.status_code, 409)
+        data = response.get_json()
+        self.assertEqual(data['error'], 'User with this email already exists')
+    
+    def test_create_user_without_email(self):
+        """Test creating a user without providing an email."""
+        # Try to create a user without an email
+        response = self.app.post('/users', json={
+            'name': 'No Email User'
+        })
+        
+        # Verify the response
+        self.assertEqual(response.status_code, 400)
+        data = response.get_json()
+        self.assertEqual(data['error'], 'Email is required')
+    
+    def test_get_user_from_api_key(self):
+        """Test that the get_user_from_api_key function works correctly."""
+        with app.app_context():
+            from app import get_user_from_api_key
+            
+            # Test with a valid API key
+            user = get_user_from_api_key(self.api_key)
+            self.assertIsNotNone(user)
+            self.assertEqual(user.id, self.test_user_id)
+            
+            # Test with an invalid API key
+            user = get_user_from_api_key('invalid-api-key')
+            self.assertIsNone(user)
+            
+            # Test with None
+            user = get_user_from_api_key(None)
+            self.assertIsNone(user)
 
 if __name__ == '__main__':
     unittest.main()
