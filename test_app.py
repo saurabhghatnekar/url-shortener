@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timedelta
 from app import app, db, URL, User, APIKey, generate_api_key, encrypt_api_key, decrypt_api_key
 
 class URLShortenerTestCase(unittest.TestCase):
@@ -388,6 +389,75 @@ class URLShortenerTestCase(unittest.TestCase):
             # Test with None
             user = get_user_from_api_key(None)
             self.assertIsNone(user)
+            
+    def test_create_url_with_expiry_date(self):
+        """Test creating a URL with an expiry date."""
+        # Set expiry date to 1 day in the future
+        future_date = (datetime.utcnow() + timedelta(days=1)).isoformat()
+        
+        # Create a URL with an expiry date
+        response = self.app.post('/shorten', 
+                               json={'url': 'https://example.com/expiring', 'expiry_date': future_date}, 
+                               headers=self.headers)
+        
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        
+        # Verify the expiry date is returned in the response
+        self.assertIsNotNone(data['expiry_date'])
+        self.assertEqual(data['expiry_date'], future_date)
+        
+        # Verify we can access the URL
+        redirect_response = self.app.get(f"/redirect?code={data['short_code']}")
+        self.assertEqual(redirect_response.status_code, 302)  # Redirect status code
+    
+    def test_expired_url_returns_410(self):
+        """Test that an expired URL returns a 410 Gone status code."""
+        with app.app_context():
+            # Create a URL that is already expired
+            expired_date = datetime.utcnow() - timedelta(days=1)
+            
+            # Create URL directly in the database with an expired date
+            url = URL(
+                short_code='EXPIR',  # Must be 6 or fewer characters
+                original_url='https://example.com/already-expired',
+                user_id=self.test_user_id,
+                expiry_date=expired_date
+            )
+            db.session.add(url)
+            db.session.commit()
+            
+            # Try to access the expired URL
+            response = self.app.get('/redirect?code=EXPIR')
+            
+            # Should return 410 Gone
+            self.assertEqual(response.status_code, 410)
+            data = response.get_json()
+            self.assertEqual(data['error'], 'URL has expired')
+    
+    def test_invalid_expiry_date_format(self):
+        """Test that an invalid expiry date format returns a 400 error."""
+        # Use an invalid date format
+        response = self.app.post('/shorten', 
+                               json={'url': 'https://example.com/test', 'expiry_date': 'not-a-date'}, 
+                               headers=self.headers)
+        
+        self.assertEqual(response.status_code, 400)
+        data = response.get_json()
+        self.assertIn('Invalid expiry date format', data['error'])
+    
+    def test_past_expiry_date(self):
+        """Test that a past expiry date returns a 400 error."""
+        # Set expiry date to 1 day in the past
+        past_date = (datetime.utcnow() - timedelta(days=1)).isoformat()
+        
+        response = self.app.post('/shorten', 
+                               json={'url': 'https://example.com/test', 'expiry_date': past_date}, 
+                               headers=self.headers)
+        
+        self.assertEqual(response.status_code, 400)
+        data = response.get_json()
+        self.assertIn('Expiry date must be in the future', data['error'])
 
 if __name__ == '__main__':
     unittest.main()
