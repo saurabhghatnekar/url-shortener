@@ -1,15 +1,19 @@
 import unittest
+import tempfile
+import os
 from datetime import datetime, timedelta
 from app import app, db, URL, User, APIKey, generate_api_key, encrypt_api_key, decrypt_api_key
 
 class URLShortenerTestCase(unittest.TestCase):
     def setUp(self):
+        # Create a temporary file for the SQLite database
+        self.db_fd, self.db_path = tempfile.mkstemp()
+        app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{self.db_path}'
+        app.config['TESTING'] = True
         self.app = app.test_client()
-        self.app.testing = True
 
         # Create a new database for testing
         with app.app_context():
-            db.drop_all()  # Drop all tables first
             db.create_all()  # Create fresh tables
             
             # Create a test user
@@ -35,9 +39,9 @@ class URLShortenerTestCase(unittest.TestCase):
             self.headers = {'X-API-Key': self.api_key}
 
     def tearDown(self):
-        # Drop the database after testing
-        with app.app_context():
-            db.drop_all()
+        # Close and remove the temporary database file
+        os.close(self.db_fd)
+        os.unlink(self.db_path)
 
     def test_multiple_codes_for_same_url(self):
         original_url = 'https://example.com/'
@@ -458,6 +462,111 @@ class URLShortenerTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         data = response.get_json()
         self.assertIn('Expiry date must be in the future', data['error'])
+        
+    def test_custom_short_code(self):
+        """Test creating a URL with a custom short code."""
+        custom_code = 'custom'
+        response = self.app.post('/shorten',
+                              json={'url': 'https://example.com/custom-test', 'custom_code': custom_code},
+                              headers=self.headers)
+        
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data['short_code'], custom_code)
+        
+        # Verify we can access the URL with the custom code
+        redirect_response = self.app.get(f"/redirect?code={custom_code}")
+        self.assertEqual(redirect_response.status_code, 302)  # Redirect status code
+    
+    def test_custom_code_already_in_use(self):
+        """Test that using an existing custom code returns a 409 error."""
+        # First create a URL with a custom code
+        custom_code = 'taken'
+        self.app.post('/shorten',
+                   json={'url': 'https://example.com/first', 'custom_code': custom_code},
+                   headers=self.headers)
+        
+        # Try to use the same custom code again
+        response = self.app.post('/shorten',
+                              json={'url': 'https://example.com/second', 'custom_code': custom_code},
+                              headers=self.headers)
+        
+        self.assertEqual(response.status_code, 409)  # Conflict
+        data = response.get_json()
+        self.assertIn('already in use', data['error'])
+    
+    def test_invalid_custom_code_format(self):
+        """Test that an invalid custom code format returns a 400 error."""
+        # Test with a code that's too long
+        response = self.app.post('/shorten',
+                              json={'url': 'https://example.com/test', 'custom_code': 'toolong'},
+                              headers=self.headers)
+        
+        self.assertEqual(response.status_code, 400)
+        data = response.get_json()
+        self.assertIn('must be 1-6', data['error'])
+        
+        # Test with invalid characters
+        response = self.app.post('/shorten',
+                              json={'url': 'https://example.com/test', 'custom_code': 'inv@lid'},
+                              headers=self.headers)
+        
+        self.assertEqual(response.status_code, 400)
+        data = response.get_json()
+        self.assertIn('alphanumeric characters or hyphens', data['error'])
+        
+    def test_create_url_with_timeout(self):
+        """Test creating a URL with a timeout value."""
+        timeout_seconds = 60  # 1 minute timeout
+        response = self.app.post('/shorten',
+                              json={'url': 'https://example.com/timeout-test', 'timeout_seconds': timeout_seconds},
+                              headers=self.headers)
+        
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data['timeout_seconds'], timeout_seconds)
+        
+    def test_invalid_timeout_value(self):
+        """Test that an invalid timeout value returns a 400 error."""
+        # Test with a negative timeout
+        response = self.app.post('/shorten',
+                              json={'url': 'https://example.com/test', 'timeout_seconds': -10},
+                              headers=self.headers)
+        
+        self.assertEqual(response.status_code, 400)
+        data = response.get_json()
+        self.assertIn('Timeout must be a positive integer', data['error'])
+        
+        # Test with a non-integer timeout
+        response = self.app.post('/shorten',
+                              json={'url': 'https://example.com/test', 'timeout_seconds': 'invalid'},
+                              headers=self.headers)
+        
+        self.assertEqual(response.status_code, 400)
+        data = response.get_json()
+        self.assertIn('Timeout must be a valid integer', data['error'])
+        
+    def test_url_timeout(self):
+        """Test that a URL with a timeout returns a 410 status code after timeout."""
+        with app.app_context():
+            # Create a URL with a very short timeout (1 second)
+            timeout_code = 'TIMEO'
+            url = URL(
+                short_code=timeout_code,
+                original_url='https://example.com/timeout',
+                timeout_seconds=1,  # 1 second timeout
+                last_accessed_at=datetime.utcnow() - timedelta(seconds=2)  # Set last access to 2 seconds ago
+            )
+            db.session.add(url)
+            db.session.commit()
+            
+            # Try to access the timed out URL
+            response = self.app.get(f'/redirect?code={timeout_code}')
+            
+            # Should return 410 Gone
+            self.assertEqual(response.status_code, 410)
+            data = response.get_json()
+            self.assertIn('timed out', data['error'])
 
 if __name__ == '__main__':
     unittest.main()
