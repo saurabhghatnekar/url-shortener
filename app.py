@@ -1,6 +1,7 @@
 from flask import Flask, request, redirect, jsonify, Response, render_template, copy_current_request_context
 import string
 import random
+import re
 from datetime import datetime
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
@@ -78,9 +79,27 @@ class URL(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     is_deleted = db.Column(db.Boolean, default=False)
     deleted_at = db.Column(db.DateTime, nullable=True)
+    expiry_date = db.Column(db.DateTime, nullable=True)  # New field for URL expiration
+    timeout_seconds = db.Column(db.Integer, nullable=True)  # New field for URL timeout in seconds
     
     # Define the relationship with the User model
     user = db.relationship('User', backref=db.backref('urls', lazy=True))
+    
+    @property
+    def is_expired(self):
+        """Check if the URL has expired."""
+        if self.expiry_date is None:
+            return False
+        return datetime.utcnow() > self.expiry_date
+        
+    @property
+    def is_timed_out(self):
+        """Check if the URL has timed out based on the last access time."""
+        if self.timeout_seconds is None or self.last_accessed_at is None:
+            return False
+        # Calculate the time difference between now and last access
+        time_diff = (datetime.utcnow() - self.last_accessed_at).total_seconds()
+        return time_diff > self.timeout_seconds
 
     def __repr__(self):
         return f'<URL {self.short_code}>'
@@ -193,19 +212,62 @@ def shorten_url():
     original_url = request.json.get('url')
     if not original_url or not original_url.strip():
         return jsonify({'error': 'URL cannot be empty'}), 400
+        
+    # Get optional expiry date
+    expiry_date_str = request.json.get('expiry_date')
+    expiry_date = None
+    if expiry_date_str:
+        try:
+            # Parse ISO format date string (e.g., '2025-12-31T23:59:59')
+            expiry_date = datetime.fromisoformat(expiry_date_str)
+            
+            # Check if expiry date is in the past
+            if expiry_date <= datetime.utcnow():
+                return jsonify({'error': 'Expiry date must be in the future'}), 400
+        except ValueError:
+            return jsonify({'error': 'Invalid expiry date format. Use ISO format (YYYY-MM-DDTHH:MM:SS)'}), 400
+            
+    # Get optional timeout in seconds
+    timeout_seconds = request.json.get('timeout_seconds')
+    if timeout_seconds is not None:
+        try:
+            timeout_seconds = int(timeout_seconds)
+            if timeout_seconds <= 0:
+                return jsonify({'error': 'Timeout must be a positive integer'}), 400
+        except ValueError:
+            return jsonify({'error': 'Timeout must be a valid integer'}), 400
 
     # Validate the URL format
     parsed_url = urlparse(original_url)
     if not parsed_url.scheme or not parsed_url.netloc:
         return jsonify({'error': 'Invalid URL format'}), 400
-
-    # Generate a new short code for every URL, even if it already exists
-    short_code = generate_short_code()
-    while URL.query.filter_by(short_code=short_code).first():
+        
+    # Check if a custom short code is provided
+    custom_code = request.json.get('custom_code')
+    if custom_code:
+        # Validate custom code format (alphanumeric and hyphens only)
+        if not re.match(r'^[a-zA-Z0-9-]{1,6}$', custom_code):
+            return jsonify({'error': 'Custom code must be 1-6 alphanumeric characters or hyphens'}), 400
+            
+        # Check if the custom code already exists
+        if URL.query.filter_by(short_code=custom_code).first():
+            return jsonify({'error': 'Custom code already in use'}), 409  # 409 Conflict
+            
+        short_code = custom_code
+    else:
+        # Generate a new short code for every URL, even if it already exists
         short_code = generate_short_code()
+        while URL.query.filter_by(short_code=short_code).first():
+            short_code = generate_short_code()
 
     try:
-        new_url = URL(short_code=short_code, original_url=original_url, user_id=user.id)
+        new_url = URL(
+            short_code=short_code, 
+            original_url=original_url, 
+            user_id=user.id,
+            expiry_date=expiry_date,
+            timeout_seconds=timeout_seconds
+        )
         db.session.add(new_url)
         db.session.commit()
 
@@ -225,7 +287,9 @@ def shorten_url():
     response_data = {
         'short_code': short_code,
         'original_url': original_url,
-        'short_url': f'http://localhost:5002/redirect?code={short_code}'
+        'short_url': f'http://localhost:5002/redirect?code={short_code}',
+        'expiry_date': new_url.expiry_date.isoformat() if new_url.expiry_date else None,
+        'timeout_seconds': new_url.timeout_seconds
     }
     return jsonify(response_data)
 
@@ -238,14 +302,22 @@ def redirect_to_url():
 
     url = URL.query.filter_by(short_code=short_code).first()
 
-    if url and not url.is_deleted:
-        # Increment click count and update last access time
-        url.click_count = (url.click_count or 0) + 1
-        url.last_accessed_at = datetime.utcnow()
-        db.session.commit()
-        return redirect(url.original_url)
-    else:
+    if not url or url.is_deleted:
         return jsonify({'error': 'URL not found'}), 404
+        
+    # Check if the URL has expired
+    if url.is_expired:
+        return jsonify({'error': 'URL has expired'}), 410  # 410 Gone is appropriate for expired content
+        
+    # Check if the URL has timed out
+    if url.is_timed_out:
+        return jsonify({'error': 'URL has timed out due to inactivity'}), 410  # 410 Gone is also appropriate for timed out content
+        
+    # Increment click count and update last access time
+    url.click_count = (url.click_count or 0) + 1
+    url.last_accessed_at = datetime.utcnow()
+    db.session.commit()
+    return redirect(url.original_url)
 
 @app.route('/delete', methods=['DELETE'])
 def delete_short_code():
