@@ -567,6 +567,84 @@ class URLShortenerTestCase(unittest.TestCase):
             self.assertEqual(response.status_code, 410)
             data = response.get_json()
             self.assertIn('timed out', data['error'])
+            
+    def test_batch_shorten_urls(self):
+        """Test the batch URL shortening endpoint."""
+        # Create a batch of URLs
+        batch_data = {
+            'urls': [
+                {'url': 'https://example.com/batch1'},
+                {'url': 'https://example.com/batch2', 'custom_code': 'batch'},
+                {'url': 'https://example.com/batch3', 'timeout_seconds': 60}
+            ]
+        }
+        
+        response = self.app.post('/shorten/batch',
+                             json=batch_data,
+                             headers=self.headers)
+        
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        
+        # Check the response structure
+        self.assertEqual(data['total'], 3)
+        self.assertEqual(data['successful'], 3)
+        self.assertEqual(data['failed'], 0)
+        self.assertEqual(len(data['results']), 3)
+        
+        # Check each result
+        for result in data['results']:
+            self.assertTrue(result['success'])
+            self.assertIn('short_code', result)
+            self.assertIn('short_url', result)
+            
+            # Check the custom code
+            if result['original_url'] == 'https://example.com/batch2':
+                self.assertEqual(result['short_code'], 'batch')
+                
+            # Check the timeout
+            if result['original_url'] == 'https://example.com/batch3':
+                self.assertEqual(result['timeout_seconds'], 60)
+                
+    def test_batch_with_errors(self):
+        """Test the batch URL shortening endpoint with some invalid URLs."""
+        # Create a batch with some invalid URLs
+        batch_data = {
+            'urls': [
+                {'url': 'https://example.com/valid'},  # Valid URL
+                {'url': ''},  # Empty URL
+                {'url': 'https://example.com/invalid', 'timeout_seconds': -10}  # Invalid timeout
+            ]
+        }
+        
+        response = self.app.post('/shorten/batch',
+                             json=batch_data,
+                             headers=self.headers)
+        
+        # Should return 207 Multi-Status for partial success
+        self.assertEqual(response.status_code, 207)
+        data = response.get_json()
+        
+        # Check the response structure
+        self.assertEqual(data['total'], 3)
+        self.assertEqual(data['successful'], 1)
+        self.assertEqual(data['failed'], 2)
+        self.assertEqual(len(data['results']), 3)
+        
+        # Check the successful result
+        success_result = next(r for r in data['results'] if r['success'])
+        self.assertEqual(success_result['original_url'], 'https://example.com/valid')
+        
+        # Check the error results
+        error_results = [r for r in data['results'] if not r['success']]
+        self.assertEqual(len(error_results), 2)
+        
+        # Check specific errors
+        empty_url_error = next(r for r in error_results if r['original_url'] == '')
+        self.assertIn('empty', empty_url_error['error'].lower())
+        
+        timeout_error = next(r for r in error_results if 'timeout_seconds' in r['original_url'].lower())
+        self.assertIn('positive', timeout_error['error'].lower())
 
 if __name__ == '__main__':
     unittest.main()

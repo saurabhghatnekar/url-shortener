@@ -170,6 +170,98 @@ def generate_short_code(length=6):
     characters = string.ascii_letters + string.digits
     return ''.join(random.choice(characters) for _ in range(length))
 
+def validate_and_create_url(url_data, user_id):
+    """Validate URL data and create a URL object.
+    
+    Args:
+        url_data (dict): Dictionary containing URL data (url, custom_code, expiry_date, timeout_seconds)
+        user_id (int): User ID to associate with the URL
+        
+    Returns:
+        tuple: (URL object, error_response)
+            If successful, URL object is returned and error_response is None
+            If error, URL object is None and error_response is a tuple (error_message, status_code)
+    """
+    # Extract and validate original URL
+    original_url = url_data.get('url')
+    if not original_url or not original_url.strip():
+        return None, ({'error': 'URL cannot be empty'}, 400)
+    
+    # Validate the URL format
+    parsed_url = urlparse(original_url)
+    if not parsed_url.scheme or not parsed_url.netloc:
+        return None, ({'error': 'Invalid URL format'}, 400)
+    
+    # Process optional expiry date
+    expiry_date_str = url_data.get('expiry_date')
+    expiry_date = None
+    if expiry_date_str:
+        try:
+            # Parse ISO format date string (e.g., '2025-12-31T23:59:59')
+            expiry_date = datetime.fromisoformat(expiry_date_str)
+            
+            # Check if expiry date is in the past
+            if expiry_date <= datetime.utcnow():
+                return None, ({'error': 'Expiry date must be in the future'}, 400)
+        except ValueError:
+            return None, ({'error': 'Invalid expiry date format. Use ISO format (YYYY-MM-DDTHH:MM:SS)'}, 400)
+    
+    # Process optional timeout
+    timeout_seconds = url_data.get('timeout_seconds')
+    if timeout_seconds is not None:
+        try:
+            timeout_seconds = int(timeout_seconds)
+            if timeout_seconds <= 0:
+                return None, ({'error': 'Timeout must be a positive integer'}, 400)
+        except ValueError:
+            return None, ({'error': 'Timeout must be a valid integer'}, 400)
+    
+    # Process optional custom code
+    custom_code = url_data.get('custom_code')
+    if custom_code:
+        # Validate custom code format (alphanumeric and hyphens only)
+        if not re.match(r'^[a-zA-Z0-9-]{1,6}$', custom_code):
+            return None, ({'error': 'Custom code must be 1-6 alphanumeric characters or hyphens'}, 400)
+            
+        # Check if the custom code already exists
+        if URL.query.filter_by(short_code=custom_code).first():
+            return None, ({'error': 'Custom code already in use'}, 409)  # 409 Conflict
+            
+        short_code = custom_code
+    else:
+        # Generate a new short code for every URL, even if it already exists
+        short_code = generate_short_code()
+        while URL.query.filter_by(short_code=short_code).first():
+            short_code = generate_short_code()
+    
+    # Create the URL object
+    new_url = URL(
+        short_code=short_code, 
+        original_url=original_url, 
+        user_id=user_id,
+        expiry_date=expiry_date,
+        timeout_seconds=timeout_seconds
+    )
+    
+    return new_url, None
+
+def format_url_response(url):
+    """Format a URL object into a response dictionary.
+    
+    Args:
+        url (URL): URL object to format
+        
+    Returns:
+        dict: Formatted response dictionary
+    """
+    return {
+        'short_code': url.short_code,
+        'original_url': url.original_url,
+        'short_url': f'http://localhost:5002/redirect?code={url.short_code}',
+        'expiry_date': url.expiry_date.isoformat() if url.expiry_date else None,
+        'timeout_seconds': url.timeout_seconds
+    }
+
 def get_user_from_api_key(api_key):
     """Get user from API key."""
     if not api_key:
@@ -208,73 +300,20 @@ def shorten_url():
     
     if not user:
         return jsonify({'error': 'Invalid or missing API key'}), 401
-        
-    original_url = request.json.get('url')
-    if not original_url or not original_url.strip():
-        return jsonify({'error': 'URL cannot be empty'}), 400
-        
-    # Get optional expiry date
-    expiry_date_str = request.json.get('expiry_date')
-    expiry_date = None
-    if expiry_date_str:
-        try:
-            # Parse ISO format date string (e.g., '2025-12-31T23:59:59')
-            expiry_date = datetime.fromisoformat(expiry_date_str)
-            
-            # Check if expiry date is in the past
-            if expiry_date <= datetime.utcnow():
-                return jsonify({'error': 'Expiry date must be in the future'}), 400
-        except ValueError:
-            return jsonify({'error': 'Invalid expiry date format. Use ISO format (YYYY-MM-DDTHH:MM:SS)'}), 400
-            
-    # Get optional timeout in seconds
-    timeout_seconds = request.json.get('timeout_seconds')
-    if timeout_seconds is not None:
-        try:
-            timeout_seconds = int(timeout_seconds)
-            if timeout_seconds <= 0:
-                return jsonify({'error': 'Timeout must be a positive integer'}), 400
-        except ValueError:
-            return jsonify({'error': 'Timeout must be a valid integer'}), 400
-
-    # Validate the URL format
-    parsed_url = urlparse(original_url)
-    if not parsed_url.scheme or not parsed_url.netloc:
-        return jsonify({'error': 'Invalid URL format'}), 400
-        
-    # Check if a custom short code is provided
-    custom_code = request.json.get('custom_code')
-    if custom_code:
-        # Validate custom code format (alphanumeric and hyphens only)
-        if not re.match(r'^[a-zA-Z0-9-]{1,6}$', custom_code):
-            return jsonify({'error': 'Custom code must be 1-6 alphanumeric characters or hyphens'}), 400
-            
-        # Check if the custom code already exists
-        if URL.query.filter_by(short_code=custom_code).first():
-            return jsonify({'error': 'Custom code already in use'}), 409  # 409 Conflict
-            
-        short_code = custom_code
-    else:
-        # Generate a new short code for every URL, even if it already exists
-        short_code = generate_short_code()
-        while URL.query.filter_by(short_code=short_code).first():
-            short_code = generate_short_code()
-
+    
+    # Use the refactored validation and creation function
+    new_url, error = validate_and_create_url(request.json, user.id)
+    if error:
+        return jsonify(error[0]), error[1]
+    
     try:
-        new_url = URL(
-            short_code=short_code, 
-            original_url=original_url, 
-            user_id=user.id,
-            expiry_date=expiry_date,
-            timeout_seconds=timeout_seconds
-        )
         db.session.add(new_url)
         db.session.commit()
 
         # Add event to queue for SSE
         event_data = {
-            'short_code': short_code,
-            'original_url': original_url,
+            'short_code': new_url.short_code,
+            'original_url': new_url.original_url,
             'created_at': new_url.created_at.isoformat()
         }
         url_events.put(event_data)
@@ -284,14 +323,105 @@ def shorten_url():
         db.session.rollback()
         raise
 
-    response_data = {
-        'short_code': short_code,
-        'original_url': original_url,
-        'short_url': f'http://localhost:5002/redirect?code={short_code}',
-        'expiry_date': new_url.expiry_date.isoformat() if new_url.expiry_date else None,
-        'timeout_seconds': new_url.timeout_seconds
-    }
+    # Format the response using the helper function
+    response_data = format_url_response(new_url)
     return jsonify(response_data)
+
+
+@app.route('/shorten/batch', methods=['POST'])
+def shorten_urls_batch():
+    """Shorten multiple URLs in a single request."""
+    # Get API key from request headers
+    api_key = request.headers.get('X-API-Key')
+    user = get_user_from_api_key(api_key)
+    
+    if not user:
+        return jsonify({'error': 'Invalid or missing API key'}), 401
+    
+    # Get the list of URL data from the request
+    urls_data = request.json.get('urls')
+    if not urls_data or not isinstance(urls_data, list):
+        return jsonify({'error': 'Request must include a list of URLs under the "urls" key'}), 400
+    
+    if len(urls_data) > 100:  # Limit batch size to prevent abuse
+        return jsonify({'error': 'Batch size cannot exceed 100 URLs'}), 400
+    
+    # Process each URL in the batch
+    results = []
+    successful_urls = []
+    
+    for url_data in urls_data:
+        # Validate and create the URL
+        new_url, error = validate_and_create_url(url_data, user.id)
+        
+        if error:
+            # Add the error to the results
+            results.append({
+                'original_url': url_data.get('url', 'Invalid URL'),
+                'success': False,
+                'error': error[0]['error'],
+                'status_code': error[1]
+            })
+        else:
+            # Add the URL to the list of successful URLs
+            successful_urls.append(new_url)
+            
+            # Add a success result
+            results.append({
+                'original_url': new_url.original_url,
+                'success': True,
+                'short_code': new_url.short_code,
+                'short_url': f'http://localhost:5002/redirect?code={new_url.short_code}',
+                'expiry_date': new_url.expiry_date.isoformat() if new_url.expiry_date else None,
+                'timeout_seconds': new_url.timeout_seconds
+            })
+    
+    # Commit all successful URLs to the database
+    if successful_urls:
+        try:
+            db.session.add_all(successful_urls)
+            db.session.commit()
+            
+            # Add events to queue for SSE
+            for url in successful_urls:
+                event_data = {
+                    'short_code': url.short_code,
+                    'original_url': url.original_url,
+                    'created_at': url.created_at.isoformat()
+                }
+                url_events.put(event_data)
+                
+        except Exception as e:
+            app.logger.error(f'Error in shorten_urls_batch: {str(e)}')
+            db.session.rollback()
+            # Mark all URLs as failed due to database error
+            for i, result in enumerate(results):
+                if result['success']:
+                    results[i] = {
+                        'original_url': result['original_url'],
+                        'success': False,
+                        'error': 'Database error occurred while saving URLs',
+                        'status_code': 500
+                    }
+    
+    # Return the results
+    response_data = {
+        'total': len(urls_data),
+        'successful': sum(1 for r in results if r['success']),
+        'failed': sum(1 for r in results if not r['success']),
+        'results': results
+    }
+    
+    # Determine the appropriate status code
+    # 200 if all succeeded, 207 if partial success, 400 if all failed
+    status_code = 200
+    if response_data['failed'] > 0:
+        if response_data['successful'] > 0:
+            status_code = 207  # Multi-Status
+        else:
+            status_code = 400  # Bad Request
+    
+    return jsonify(response_data), status_code
 
 @app.route('/redirect', methods=['GET'])
 def redirect_to_url():
