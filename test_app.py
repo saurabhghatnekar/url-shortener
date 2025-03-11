@@ -2,46 +2,79 @@ import unittest
 import tempfile
 import os
 from datetime import datetime, timedelta
+
+# Set the testing environment variable
+os.environ['TESTING'] = 'True'
+
+# Import after setting the environment variable
 from app import app, db, URL, User, APIKey, generate_api_key, encrypt_api_key, decrypt_api_key
 
 class URLShortenerTestCase(unittest.TestCase):
     def setUp(self):
-        # Create a temporary file for the SQLite database
-        self.db_fd, self.db_path = tempfile.mkstemp()
-        app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{self.db_path}'
+        # Set up the Flask test client
         app.config['TESTING'] = True
         self.app = app.test_client()
-
-        # Create a new database for testing
+        
+        # Create the database tables
         with app.app_context():
-            db.create_all()  # Create fresh tables
+            db.create_all()
             
-            # Create a test user
-            test_user = User(
+            # Create a hobby tier test user (default user)
+            hobby_user = User(
                 email='test@example.com',
-                name='Test User'
+                name='Test User',
+                pricing_tier='hobby'  # Explicitly set to hobby tier
             )
-            db.session.add(test_user)
+            db.session.add(hobby_user)
             db.session.flush()  # Flush to get the user ID
             
-            # Store the user ID for tests
-            self.test_user_id = test_user.id
+            # Store the hobby user ID for tests
+            self.hobby_user_id = hobby_user.id
             
-            # Create an API key for the test user
-            api_key_value = generate_api_key()
-            test_api_key = APIKey(user_id=self.test_user_id)
-            test_api_key.key = api_key_value
-            db.session.add(test_api_key)
+            # Create an API key for the hobby user
+            hobby_api_key_value = generate_api_key()
+            hobby_api_key = APIKey(user_id=self.hobby_user_id)
+            hobby_api_key.key = hobby_api_key_value
+            db.session.add(hobby_api_key)
+            
+            # Create an enterprise tier test user
+            enterprise_user = User(
+                email='enterprise@example.com',
+                name='Enterprise User',
+                pricing_tier='enterprise'  # Set to enterprise tier
+            )
+            db.session.add(enterprise_user)
+            db.session.flush()  # Flush to get the user ID
+            
+            # Store the enterprise user ID for tests
+            self.enterprise_user_id = enterprise_user.id
+            
+            # Create an API key for the enterprise user
+            enterprise_api_key_value = generate_api_key()
+            enterprise_api_key = APIKey(user_id=self.enterprise_user_id)
+            enterprise_api_key.key = enterprise_api_key_value
+            db.session.add(enterprise_api_key)
+            
             db.session.commit()
             
-            # Store the API key for tests
-            self.api_key = api_key_value
-            self.headers = {'X-API-Key': self.api_key}
+            # Store the API keys for tests
+            self.hobby_api_key = hobby_api_key_value
+            self.enterprise_api_key = enterprise_api_key_value
+            
+            # Set up headers for both user types
+            self.hobby_headers = {'X-API-Key': self.hobby_api_key}
+            self.enterprise_headers = {'X-API-Key': self.enterprise_api_key}
+            
+            # For backward compatibility with existing tests
+            self.test_user_id = self.hobby_user_id
+            self.api_key = self.hobby_api_key
+            self.headers = self.hobby_headers
 
     def tearDown(self):
-        # Close and remove the temporary database file
-        os.close(self.db_fd)
-        os.unlink(self.db_path)
+        # Clean up the database
+        with app.app_context():
+            db.session.remove()
+            db.drop_all()
 
     def test_multiple_codes_for_same_url(self):
         original_url = 'https://example.com/'
@@ -568,8 +601,8 @@ class URLShortenerTestCase(unittest.TestCase):
             data = response.get_json()
             self.assertIn('timed out', data['error'])
             
-    def test_batch_shorten_urls(self):
-        """Test the batch URL shortening endpoint."""
+    def test_batch_shorten_urls_with_enterprise_tier(self):
+        """Test the batch URL shortening endpoint with enterprise tier user."""
         # Create a batch of URLs
         batch_data = {
             'urls': [
@@ -579,9 +612,10 @@ class URLShortenerTestCase(unittest.TestCase):
             ]
         }
         
+        # Use enterprise user headers
         response = self.app.post('/shorten/batch',
                              json=batch_data,
-                             headers=self.headers)
+                             headers=self.enterprise_headers)
         
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
@@ -606,6 +640,30 @@ class URLShortenerTestCase(unittest.TestCase):
             if result['original_url'] == 'https://example.com/batch3':
                 self.assertEqual(result['timeout_seconds'], 60)
                 
+    def test_batch_shorten_urls_with_hobby_tier(self):
+        """Test the batch URL shortening endpoint with hobby tier user (should be denied)."""
+        # Create a batch of URLs
+        batch_data = {
+            'urls': [
+                {'url': 'https://example.com/batch1'},
+                {'url': 'https://example.com/batch2'}
+            ]
+        }
+        
+        # Use hobby user headers
+        response = self.app.post('/shorten/batch',
+                             json=batch_data,
+                             headers=self.hobby_headers)
+        
+        # Should return 403 Forbidden
+        self.assertEqual(response.status_code, 403)
+        data = response.get_json()
+        
+        # Check the error message
+        self.assertIn('Access denied', data['error'])
+        self.assertEqual(data['current_tier'], 'hobby')
+        self.assertEqual(data['required_tier'], 'enterprise')
+                
     def test_batch_with_errors(self):
         """Test the batch URL shortening endpoint with some invalid URLs."""
         # Create a batch with some invalid URLs
@@ -617,9 +675,10 @@ class URLShortenerTestCase(unittest.TestCase):
             ]
         }
         
+        # Use enterprise user headers (since hobby users can't access this endpoint)
         response = self.app.post('/shorten/batch',
                              json=batch_data,
-                             headers=self.headers)
+                             headers=self.enterprise_headers)
         
         # Should return 207 Multi-Status for partial success
         self.assertEqual(response.status_code, 207)
@@ -643,8 +702,98 @@ class URLShortenerTestCase(unittest.TestCase):
         empty_url_error = next(r for r in error_results if r['original_url'] == '')
         self.assertIn('empty', empty_url_error['error'].lower())
         
-        timeout_error = next(r for r in error_results if 'timeout_seconds' in r['original_url'].lower())
+        # Find the timeout error by checking for the URL with the invalid timeout
+        timeout_error = next(r for r in error_results if r['original_url'] == 'https://example.com/invalid')
         self.assertIn('positive', timeout_error['error'].lower())
+        
+    def test_pricing_tier_update(self):
+        """Test updating a user's pricing tier."""
+        with app.app_context():
+            # Get the hobby user
+            hobby_user = User.query.filter_by(email='test@example.com').first()
+            self.assertEqual(hobby_user.pricing_tier, 'hobby')
+            
+            # Update the user's pricing tier to enterprise
+            hobby_user.pricing_tier = 'enterprise'
+            db.session.commit()
+            
+            # Verify the update
+            updated_user = User.query.filter_by(email='test@example.com').first()
+            self.assertEqual(updated_user.pricing_tier, 'enterprise')
+            
+            # Now the user should be able to access the batch endpoint
+            batch_data = {
+                'urls': [
+                    {'url': 'https://example.com/upgrade-test'}
+                ]
+            }
+            
+            response = self.app.post('/shorten/batch',
+                                 json=batch_data,
+                                 headers=self.hobby_headers)
+            
+            # Should now return 200 OK instead of 403 Forbidden
+            self.assertEqual(response.status_code, 200)
+            
+    def test_update_tier_endpoint(self):
+        """Test the endpoint for updating a user's pricing tier."""
+        # Get the hobby user ID
+        with app.app_context():
+            hobby_user = User.query.filter_by(email='test@example.com').first()
+            self.assertEqual(hobby_user.pricing_tier, 'hobby')
+        
+        # Use the enterprise user's API key to update the hobby user's tier
+        update_data = {
+            'pricing_tier': 'enterprise'
+        }
+        
+        response = self.app.put(
+            f'/users/{self.hobby_user_id}/update-tier',
+            json=update_data,
+            headers=self.enterprise_headers
+        )
+        
+        # Should return 200 OK
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        
+        # Check the response data
+        self.assertEqual(data['user_id'], self.hobby_user_id)
+        self.assertEqual(data['pricing_tier'], 'enterprise')
+        self.assertIn('User pricing tier updated', data['message'])
+        
+        # Verify the user can now access the batch endpoint
+        batch_data = {
+            'urls': [
+                {'url': 'https://example.com/api-upgrade-test'}
+            ]
+        }
+        
+        batch_response = self.app.post('/shorten/batch',
+                                 json=batch_data,
+                                 headers=self.hobby_headers)
+        
+        # Should return 200 OK
+        self.assertEqual(batch_response.status_code, 200)
+        
+    def test_update_tier_invalid_tier(self):
+        """Test updating a user's pricing tier with an invalid tier value."""
+        update_data = {
+            'pricing_tier': 'premium'  # Invalid tier
+        }
+        
+        response = self.app.put(
+            f'/users/{self.hobby_user_id}/update-tier',
+            json=update_data,
+            headers=self.enterprise_headers
+        )
+        
+        # Should return 400 Bad Request
+        self.assertEqual(response.status_code, 400)
+        data = response.get_json()
+        
+        # Check the error message
+        self.assertIn('Invalid pricing tier', data['error'])
 
 if __name__ == '__main__':
     unittest.main()

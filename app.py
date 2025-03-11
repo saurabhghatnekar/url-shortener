@@ -18,7 +18,17 @@ import os
 
 app = Flask(__name__)
 app.template_folder = os.path.abspath(os.path.join(os.path.dirname(__file__), 'templates'))
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://neondb_owner:npg_8LqUgf2eYSid@ep-billowing-sunset-a5goac87-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require'
+
+# Check if we're in a testing environment
+if os.environ.get('TESTING') == 'True':
+    # Use SQLite in-memory database for testing
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
+else:
+    # Use environment variable for database URI if available, otherwise use the PostgreSQL URI
+    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
+        'DATABASE_URL',
+        'postgresql://neondb_owner:npg_8LqUgf2eYSid@ep-billowing-sunset-a5goac87-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require'
+    )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -64,6 +74,7 @@ class User(db.Model):
     email = db.Column(db.String, unique=True, nullable=False)
     name = db.Column(db.String, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    pricing_tier = db.Column(db.String, default='hobby', nullable=False)  # 'hobby' or 'enterprise'
 
     def __repr__(self):
         return f'<User {self.email}>'
@@ -137,20 +148,26 @@ def init_db():
     # Create sample users if they don't exist
     try:
         if User.query.count() == 0:
-            sample_users = [
-                User(email='user1@example.com', name='User One'),
-                User(email='user2@example.com', name='User Two'),
-                User(email='user3@example.com', name='User Three')
+            # Create hobby tier users
+            hobby_users = [
+                User(email='user1@example.com', name='User One', pricing_tier='hobby'),
+                User(email='user2@example.com', name='User Two', pricing_tier='hobby'),
+                User(email='user3@example.com', name='User Three', pricing_tier='hobby')
             ]
-            db.session.add_all(sample_users)
+            db.session.add_all(hobby_users)
+            
+            # Create an enterprise tier user
+            enterprise_user = User(email='enterprise@example.com', name='Enterprise User', pricing_tier='enterprise')
+            db.session.add(enterprise_user)
+            
             db.session.commit()
             
-            # Create API keys for sample users
-            for user in sample_users:
+            # Create API keys for all users
+            for user in User.query.all():
                 api_key = APIKey(user_id=user.id)
                 api_key.key = generate_api_key()  # This will trigger the encryption via the setter
                 db.session.add(api_key)
-                app.logger.info(f'Created API key for user: {user.email} with API key: {api_key.key}')
+                app.logger.info(f'Created API key for user: {user.email} (tier: {user.pricing_tier}) with API key: {api_key.key}')
             db.session.commit()
     except Exception as e:
         app.logger.error(f"Error initializing database: {str(e)}")
@@ -337,6 +354,14 @@ def shorten_urls_batch():
     
     if not user:
         return jsonify({'error': 'Invalid or missing API key'}), 401
+    
+    # Check if the user has the enterprise tier
+    if user.pricing_tier != 'enterprise':
+        return jsonify({
+            'error': 'Access denied. Batch URL shortening is only available for enterprise tier users.',
+            'current_tier': user.pricing_tier,
+            'required_tier': 'enterprise'
+        }), 403
     
     # Get the list of URL data from the request
     urls_data = request.json.get('urls')
@@ -675,6 +700,48 @@ def get_most_shortened_urls():
 @app.teardown_appcontext
 def close_connection(exception):
     pass
+
+@app.route('/users/<int:user_id>/update-tier', methods=['PUT'])
+def update_user_tier(user_id):
+    """Update a user's pricing tier."""
+    # Get the API key from the request headers
+    api_key = request.headers.get('X-API-Key')
+    if not api_key:
+        return jsonify({'error': 'API key is required'}), 401
+    
+    # Get the user from the API key
+    admin_user = get_user_from_api_key(api_key)
+    if not admin_user:
+        return jsonify({'error': 'Invalid API key'}), 401
+    
+    # Get the request data
+    data = request.get_json()
+    
+    # Validate the request data
+    if not data or 'pricing_tier' not in data:
+        return jsonify({'error': 'Pricing tier is required'}), 400
+    
+    pricing_tier = data['pricing_tier']
+    
+    # Validate the pricing tier
+    if pricing_tier not in ['hobby', 'enterprise']:
+        return jsonify({'error': 'Invalid pricing tier. Must be either "hobby" or "enterprise".'}), 400
+    
+    # Get the user to update
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    # Update the user's pricing tier
+    user.pricing_tier = pricing_tier
+    db.session.commit()
+    
+    return jsonify({
+        'user_id': user.id,
+        'email': user.email,
+        'pricing_tier': user.pricing_tier,
+        'message': f'User pricing tier updated to {pricing_tier}'
+    })
 
 if __name__ == '__main__':
     with app.app_context():

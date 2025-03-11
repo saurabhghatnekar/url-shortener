@@ -4,6 +4,8 @@
 
 The URL Shortener Batch API allows you to create multiple short URLs in a single request. This is useful for bulk processing of URLs, saving time and reducing the number of API calls needed.
 
+> **Note:** This endpoint is only available to users on the **Enterprise** pricing tier. Users on the **Hobby** tier will receive a 403 Forbidden response when attempting to use this endpoint.
+
 ## Endpoint
 
 ```
@@ -115,10 +117,12 @@ For failed URLs:
 | 207 | Multi-Status: Some URLs were created, others failed |
 | 400 | Bad Request: All URLs failed or request format was invalid |
 | 401 | Unauthorized: Invalid or missing API key |
+| 403 | Forbidden: User does not have the required pricing tier (Enterprise) |
 
 ## Limitations
 
 - Maximum batch size: 100 URLs per request
+- Only available to users on the Enterprise pricing tier
 - Rate limiting may apply depending on your account type
 
 ## Examples
