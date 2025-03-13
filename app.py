@@ -92,6 +92,7 @@ class URL(db.Model):
     deleted_at = db.Column(db.DateTime, nullable=True)
     expiry_date = db.Column(db.DateTime, nullable=True)  # New field for URL expiration
     timeout_seconds = db.Column(db.Integer, nullable=True)  # New field for URL timeout in seconds
+    password = db.Column(db.String, nullable=True)  # New field for password protection
     
     # Define the relationship with the User model
     user = db.relationship('User', backref=db.backref('urls', lazy=True))
@@ -191,7 +192,7 @@ def validate_and_create_url(url_data, user_id):
     """Validate URL data and create a URL object.
     
     Args:
-        url_data (dict): Dictionary containing URL data (url, custom_code, expiry_date, timeout_seconds)
+        url_data (dict): Dictionary containing URL data (url, custom_code, expiry_date, timeout_seconds, password)
         user_id (int): User ID to associate with the URL
         
     Returns:
@@ -251,13 +252,17 @@ def validate_and_create_url(url_data, user_id):
         while URL.query.filter_by(short_code=short_code).first():
             short_code = generate_short_code()
     
+    # Process optional password
+    password = url_data.get('password')
+    
     # Create the URL object
     new_url = URL(
         short_code=short_code, 
         original_url=original_url, 
         user_id=user_id,
         expiry_date=expiry_date,
-        timeout_seconds=timeout_seconds
+        timeout_seconds=timeout_seconds,
+        password=password
     )
     
     return new_url, None
@@ -276,7 +281,9 @@ def format_url_response(url):
         'original_url': url.original_url,
         'short_url': f'http://localhost:5002/redirect?code={url.short_code}',
         'expiry_date': url.expiry_date.isoformat() if url.expiry_date else None,
-        'timeout_seconds': url.timeout_seconds
+        'timeout_seconds': url.timeout_seconds,
+        'is_password_protected': bool(url.password),
+        # Don't return the actual password in the response for security reasons
     }
 
 def get_user_from_api_key(api_key):
@@ -398,7 +405,8 @@ def shorten_urls_batch():
                 'short_code': new_url.short_code,
                 'short_url': f'http://localhost:5002/redirect?code={new_url.short_code}',
                 'expiry_date': new_url.expiry_date.isoformat() if new_url.expiry_date else None,
-                'timeout_seconds': new_url.timeout_seconds
+                'timeout_seconds': new_url.timeout_seconds,
+                'is_password_protected': bool(new_url.password)
             })
     
     # Commit all successful URLs to the database
@@ -450,7 +458,11 @@ def shorten_urls_batch():
 
 @app.route('/redirect', methods=['GET'])
 def redirect_to_url():
-    """Redirect to the original URL based on the short code."""
+    """Redirect to the original URL based on the short code.
+    
+    If the URL is password-protected, the request must include the correct password
+    as a query parameter to access the original URL.
+    """
     short_code = request.args.get('code')
     if not short_code:
         return jsonify({'error': 'Short code is required'}), 400
@@ -467,6 +479,18 @@ def redirect_to_url():
     # Check if the URL has timed out
     if url.is_timed_out:
         return jsonify({'error': 'URL has timed out due to inactivity'}), 410  # 410 Gone is also appropriate for timed out content
+    
+    # Check if the URL is password-protected
+    if url.password:
+        # Get password from request
+        provided_password = request.args.get('password')
+        
+        # If no password provided or password is incorrect
+        if not provided_password or provided_password != url.password:
+            return jsonify({
+                'error': 'This URL is password-protected', 
+                'requires_password': True
+            }), 401
         
     # Increment click count and update last access time
     url.click_count = (url.click_count or 0) + 1
@@ -504,7 +528,14 @@ def delete_short_code():
 
 @app.route('/edit', methods=['PUT'])
 def edit_short_code():
-    """Edit the original URL for a given short code."""
+    """Edit a short code's properties including URL, expiry date, and timeout.
+    
+    This endpoint allows users to:
+    1. Update the destination URL
+    2. Set or update the expiry date (can be set to a past date to make the URL inactive)
+    3. Clear the expiry date (to reactivate an inactive URL)
+    4. Set or update the timeout seconds
+    """
     # Get API key from request headers
     api_key = request.headers.get('X-API-Key')
     user = get_user_from_api_key(api_key)
@@ -513,10 +544,8 @@ def edit_short_code():
         return jsonify({'error': 'Invalid or missing API key'}), 401
         
     short_code = request.json.get('code')
-    new_url = request.json.get('url')
-
-    if not short_code or not new_url:
-        return jsonify({'error': 'Short code and new URL are required'}), 400
+    if not short_code:
+        return jsonify({'error': 'Short code is required'}), 400
 
     url_entry = URL.query.filter_by(short_code=short_code).first()
 
@@ -527,9 +556,62 @@ def edit_short_code():
     if url_entry.user_id != user.id:
         return jsonify({'error': 'You do not have permission to edit this URL'}), 403
 
-    url_entry.original_url = new_url
+    # Update URL if provided
+    new_url = request.json.get('url')
+    if new_url:
+        url_entry.original_url = new_url
+    
+    # Handle expiry date
+    if 'expiry_date' in request.json:
+        expiry_date_str = request.json.get('expiry_date')
+        
+        # If null/None is provided, clear the expiry date (reactivate the URL)
+        if expiry_date_str is None:
+            url_entry.expiry_date = None
+        else:
+            try:
+                # Parse ISO format date string
+                url_entry.expiry_date = datetime.fromisoformat(expiry_date_str)
+            except ValueError:
+                return jsonify({'error': 'Invalid expiry date format. Use ISO format (YYYY-MM-DDTHH:MM:SS)'}), 400
+    
+    # Handle timeout seconds
+    if 'timeout_seconds' in request.json:
+        timeout_seconds = request.json.get('timeout_seconds')
+        
+        # If null/None is provided, clear the timeout
+        if timeout_seconds is None:
+            url_entry.timeout_seconds = None
+        else:
+            try:
+                timeout_seconds = int(timeout_seconds)
+                if timeout_seconds <= 0:
+                    return jsonify({'error': 'Timeout must be a positive integer'}), 400
+                url_entry.timeout_seconds = timeout_seconds
+            except ValueError:
+                return jsonify({'error': 'Timeout must be a valid integer'}), 400
+                
+    # Handle password
+    if 'password' in request.json:
+        password = request.json.get('password')
+        # If null/None is provided, remove the password protection
+        url_entry.password = password
+    
     db.session.commit()
-    return jsonify({'message': 'URL updated successfully'}), 200
+    
+    # Prepare response with current URL status
+    response_data = {
+        'message': 'URL updated successfully',
+        'short_code': url_entry.short_code,
+        'original_url': url_entry.original_url,
+        'expiry_date': url_entry.expiry_date.isoformat() if url_entry.expiry_date else None,
+        'timeout_seconds': url_entry.timeout_seconds,
+        'is_active': not url_entry.is_expired,
+        'is_password_protected': bool(url_entry.password),
+        'short_url': f'http://localhost:5002/redirect?code={url_entry.short_code}'
+    }
+    
+    return jsonify(response_data), 200
 
 @app.route('/analytics/stream')
 def stream_urls():

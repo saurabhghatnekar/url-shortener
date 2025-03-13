@@ -1,0 +1,642 @@
+{
+	"info": {
+		"_postman_id": "b0d58127-692a-42b6-a787-763ba60ef896",
+		"name": "URL Shortener API",
+		"description": "A collection for testing the URL Shortener API with all available endpoints",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "User Management",
+			"item": [
+				{
+					"name": "Create User",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"test@example.com\",\n    \"name\": \"Test User\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:5002/users",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"users"
+							]
+						},
+						"description": "Create a new user and generate an API key"
+					},
+					"response": []
+				},
+				{
+					"name": "Update User Tier",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"pricing_tier\": \"enterprise\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:5002/users/{{user_id}}/update-tier",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"users",
+								"{{user_id}}",
+								"update-tier"
+							]
+						},
+						"description": "Update a user's pricing tier (hobby or enterprise)"
+					},
+					"response": []
+				}
+			],
+			"description": "Endpoints for user management"
+		},
+		{
+			"name": "URL Operations",
+			"item": [
+				{
+					"name": "Shorten URL",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"url\": \"https://example.com/long-url-to-shorten\",\n    \"custom_code\": \"custom\",\n    \"expiry_date\": \"2025-12-31T23:59:59\",\n    \"timeout_seconds\": 3600\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:5002/shorten",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"shorten"
+							]
+						},
+						"description": "Shorten a URL with optional custom code, expiry date, and timeout"
+					},
+					"response": []
+				},
+				{
+					"name": "Shorten URL with Password Protection",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"url\": \"https://example.com/premium-content\",\n    \"custom_code\": \"premium\",\n    \"password\": \"paywall123\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:5002/shorten",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"shorten"
+							]
+						},
+						"description": "Create a password-protected short URL that requires a password to access"
+					},
+					"response": []
+				},
+				{
+					"name": "Shorten URLs Batch",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"urls\": [\n        {\n            \"url\": \"https://example.com/url1\",\n            \"custom_code\": \"url1\",\n            \"expiry_date\": \"2025-12-31T23:59:59\",\n            \"timeout_seconds\": 3600\n        },\n        {\n            \"url\": \"https://example.com/url2\",\n            \"custom_code\": \"url2\"\n        },\n        {\n            \"url\": \"https://example.com/url3\"\n        },\n        {\n            \"url\": \"https://example.com/premium-content\",\n            \"custom_code\": \"premium1\",\n            \"password\": \"paywall123\"\n        }\n    ]\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:5002/shorten/batch",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"shorten",
+								"batch"
+							]
+						},
+						"description": "Shorten multiple URLs in a single request (Enterprise tier only)"
+					},
+					"response": []
+				},
+				{
+					"name": "Redirect to URL",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:5002/redirect?code={{short_code}}",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"redirect"
+							],
+							"query": [
+								{
+									"key": "code",
+									"value": "{{short_code}}"
+								}
+							]
+						},
+						"description": "Redirect to the original URL using the short code"
+					},
+					"response": []
+				},
+				{
+					"name": "Redirect to Password-Protected URL",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:5002/redirect?code={{short_code}}&password={{password}}",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"redirect"
+							],
+							"query": [
+								{
+									"key": "code",
+									"value": "{{short_code}}"
+								},
+								{
+									"key": "password",
+									"value": "{{password}}"
+								}
+							]
+						},
+						"description": "Access a password-protected URL by providing the correct password"
+					},
+					"response": []
+				},
+				{
+					"name": "Edit URL",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"code\": \"{{short_code}}\",\n    \"url\": \"https://example.com/new-destination\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:5002/edit",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"edit"
+							]
+						},
+						"description": "Edit the destination URL for a given short code"
+					},
+					"response": []
+				},
+				{
+					"name": "Add Password Protection",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"code\": \"{{short_code}}\",\n    \"password\": \"paywall123\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:5002/edit",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"edit"
+							]
+						},
+						"description": "Add password protection to an existing short code"
+					},
+					"response": []
+				},
+				{
+					"name": "Remove Password Protection",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"code\": \"{{short_code}}\",\n    \"password\": null\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:5002/edit",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"edit"
+							]
+						},
+						"description": "Remove password protection from a short code"
+					},
+					"response": []
+				},
+				{
+					"name": "Make Short Code Inactive",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"code\": \"{{short_code}}\",\n    \"expiry_date\": \"2023-01-01T00:00:00\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:5002/edit",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"edit"
+							]
+						},
+						"description": "Make a short code inactive by setting its expiry date to a past date"
+					},
+					"response": []
+				},
+				{
+					"name": "Reactivate Short Code",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"code\": \"{{short_code}}\",\n    \"expiry_date\": null\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:5002/edit",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"edit"
+							]
+						},
+						"description": "Reactivate a short code by clearing its expiry date"
+					},
+					"response": []
+				},
+				{
+					"name": "Reactivate Short Code with Future Date",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"code\": \"{{short_code}}\",\n    \"expiry_date\": \"2025-12-31T23:59:59\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://localhost:5002/edit",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"edit"
+							]
+						},
+						"description": "Reactivate a short code by setting its expiry date to a future date"
+					},
+					"response": []
+				},
+				{
+					"name": "Delete URL",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "http://localhost:5002/delete?code={{short_code}}",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"delete"
+							],
+							"query": [
+								{
+									"key": "code",
+									"value": "{{short_code}}"
+								}
+							]
+						},
+						"description": "Delete a shortened URL by its code"
+					},
+					"response": []
+				}
+			],
+			"description": "Endpoints for URL shortening and management"
+		},
+		{
+			"name": "Analytics",
+			"item": [
+				{
+					"name": "Analytics Dashboard",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:5002/analytics",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"analytics"
+							]
+						},
+						"description": "View the analytics dashboard"
+					},
+					"response": []
+				},
+				{
+					"name": "Latest URLs",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:5002/analytics/latest",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"analytics",
+								"latest"
+							]
+						},
+						"description": "Get the last 10 shortened URLs"
+					},
+					"response": []
+				},
+				{
+					"name": "Popular URLs",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:5002/analytics/popular",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"analytics",
+								"popular"
+							]
+						},
+						"description": "Get the top 10 most clicked URLs"
+					},
+					"response": []
+				},
+				{
+					"name": "Most Shortened URLs",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:5002/analytics/most-shortened",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"analytics",
+								"most-shortened"
+							]
+						},
+						"description": "Get the top 10 most shortened URLs"
+					},
+					"response": []
+				},
+				{
+					"name": "Stream URL Events",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:5002/analytics/stream",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5002",
+							"path": [
+								"analytics",
+								"stream"
+							]
+						},
+						"description": "Stream URL creation events using Server-Sent Events (SSE)"
+					},
+					"response": []
+				}
+			],
+			"description": "Endpoints for analytics and statistics"
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "api_key",
+			"value": "your_api_key_here",
+			"type": "string",
+			"description": "Your API key for authentication"
+		},
+		{
+			"key": "user_id",
+			"value": "1",
+			"type": "string",
+			"description": "User ID for operations that require it"
+		},
+		{
+			"key": "short_code",
+			"value": "custom",
+			"type": "string",
+			"description": "Short code for URL operations"
+		}
+	]
+}

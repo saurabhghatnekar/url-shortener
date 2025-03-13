@@ -795,5 +795,308 @@ class URLShortenerTestCase(unittest.TestCase):
         # Check the error message
         self.assertIn('Invalid pricing tier', data['error'])
 
+    def test_make_short_code_inactive(self):
+        """Test making a short code inactive by setting an expiry date in the past."""
+        # First create a URL
+        response = self.app.post('/shorten',
+                              json={'url': 'https://example.com/to-deactivate'},
+                              headers=self.headers)
+        
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        short_code = data['short_code']
+        
+        # Verify the URL is active (can be accessed)
+        redirect_response = self.app.get(f"/redirect?code={short_code}")
+        self.assertEqual(redirect_response.status_code, 302)  # Redirect status code
+        
+        # Set expiry date to 1 day in the past to make it inactive
+        past_date = (datetime.utcnow() - timedelta(days=1)).isoformat()
+        
+        edit_response = self.app.put('/edit',
+                                  json={'code': short_code, 'expiry_date': past_date},
+                                  headers=self.headers)
+        
+        self.assertEqual(edit_response.status_code, 200)
+        edit_data = edit_response.get_json()
+        self.assertEqual(edit_data['expiry_date'], past_date)
+        self.assertFalse(edit_data['is_active'])
+        
+        # Verify the URL is now inactive
+        inactive_response = self.app.get(f"/redirect?code={short_code}")
+        self.assertEqual(inactive_response.status_code, 410)  # Gone status code
+        inactive_data = inactive_response.get_json()
+        self.assertEqual(inactive_data['error'], 'URL has expired')
+    
+    def test_reactivate_short_code(self):
+        """Test reactivating a short code by clearing its expiry date."""
+        with app.app_context():
+            # Create a URL that is already expired
+            expired_date = datetime.utcnow() - timedelta(days=1)
+            
+            # Create URL directly in the database with an expired date
+            url = URL(
+                short_code='REACT',  # Must be 6 or fewer characters
+                original_url='https://example.com/to-reactivate',
+                user_id=self.test_user_id,
+                expiry_date=expired_date
+            )
+            db.session.add(url)
+            db.session.commit()
+            
+            # Verify the URL is inactive
+            inactive_response = self.app.get('/redirect?code=REACT')
+            self.assertEqual(inactive_response.status_code, 410)  # Gone status code
+            
+            # Reactivate by clearing the expiry date
+            reactivate_response = self.app.put('/edit',
+                                          json={'code': 'REACT', 'expiry_date': None},
+                                          headers=self.headers)
+            
+            self.assertEqual(reactivate_response.status_code, 200)
+            reactivate_data = reactivate_response.get_json()
+            self.assertIsNone(reactivate_data['expiry_date'])
+            self.assertTrue(reactivate_data['is_active'])
+            
+            # Verify the URL is now active again
+            active_response = self.app.get('/redirect?code=REACT')
+            self.assertEqual(active_response.status_code, 302)  # Redirect status code
+    
+    def test_reactivate_short_code_with_future_date(self):
+        """Test reactivating a short code by setting its expiry date to the future."""
+        with app.app_context():
+            # Create a URL that is already expired
+            expired_date = datetime.utcnow() - timedelta(days=1)
+            
+            # Create URL directly in the database with an expired date
+            url = URL(
+                short_code='REACT2',  # Must be 6 or fewer characters
+                original_url='https://example.com/to-reactivate-future',
+                user_id=self.test_user_id,
+                expiry_date=expired_date
+            )
+            db.session.add(url)
+            db.session.commit()
+            
+            # Verify the URL is inactive
+            inactive_response = self.app.get('/redirect?code=REACT2')
+            self.assertEqual(inactive_response.status_code, 410)  # Gone status code
+            
+            # Reactivate by setting a future expiry date
+            future_date = (datetime.utcnow() + timedelta(days=7)).isoformat()
+            reactivate_response = self.app.put('/edit',
+                                          json={'code': 'REACT2', 'expiry_date': future_date},
+                                          headers=self.headers)
+            
+            self.assertEqual(reactivate_response.status_code, 200)
+            reactivate_data = reactivate_response.get_json()
+            self.assertEqual(reactivate_data['expiry_date'], future_date)
+            self.assertTrue(reactivate_data['is_active'])
+            
+            # Verify the URL is now active again
+            active_response = self.app.get('/redirect?code=REACT2')
+            self.assertEqual(active_response.status_code, 302)  # Redirect status code
+    
+    def test_edit_only_expiry_date(self):
+        """Test editing only the expiry date without changing the URL."""
+        # First create a URL
+        response = self.app.post('/shorten',
+                              json={'url': 'https://example.com/expiry-only'},
+                              headers=self.headers)
+        
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        short_code = data['short_code']
+        original_url = data['original_url']
+        
+        # Edit only the expiry date
+        future_date = (datetime.utcnow() + timedelta(days=30)).isoformat()
+        edit_response = self.app.put('/edit',
+                                  json={'code': short_code, 'expiry_date': future_date},
+                                  headers=self.headers)
+        
+        self.assertEqual(edit_response.status_code, 200)
+        edit_data = edit_response.get_json()
+        
+        # Verify that only the expiry date changed, not the URL
+        self.assertEqual(edit_data['original_url'], original_url)
+        self.assertEqual(edit_data['expiry_date'], future_date)
+        
+    def test_create_password_protected_url(self):
+        """Test creating a password-protected URL."""
+        # Create a password-protected URL
+        response = self.app.post('/shorten',
+                               json={
+                                   'url': 'https://example.com/premium-content',
+                                   'custom_code': 'PASS',
+                                   'password': 'secret123'
+                               },
+                               headers=self.headers)
+        
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        
+        # Verify the URL is marked as password-protected
+        self.assertTrue(data['is_password_protected'])
+        self.assertEqual(data['short_code'], 'PASS')
+        
+        # Verify the password itself is not returned in the response
+        self.assertNotIn('password', data)
+    
+    def test_access_password_protected_url_without_password(self):
+        """Test accessing a password-protected URL without providing a password."""
+        with app.app_context():
+            # Create a password-protected URL directly in the database
+            url = URL(
+                short_code='SECURE',
+                original_url='https://example.com/secure-content',
+                user_id=self.test_user_id,
+                password='secret123'
+            )
+            db.session.add(url)
+            db.session.commit()
+            
+            # Try to access without password
+            response = self.app.get('/redirect?code=SECURE')
+            
+            # Should return 401 Unauthorized
+            self.assertEqual(response.status_code, 401)
+            data = response.get_json()
+            self.assertEqual(data['error'], 'This URL is password-protected')
+    
+    def test_access_password_protected_url_with_correct_password(self):
+        """Test accessing a password-protected URL with the correct password."""
+        with app.app_context():
+            # Create a password-protected URL directly in the database
+            url = URL(
+                short_code='SECURE2',
+                original_url='https://example.com/secure-content-2',
+                user_id=self.test_user_id,
+                password='secret123'
+            )
+            db.session.add(url)
+            db.session.commit()
+            
+            # Access with correct password
+            response = self.app.get('/redirect?code=SECURE2&password=secret123')
+            
+            # Should redirect to the original URL
+            self.assertEqual(response.status_code, 302)
+    
+    def test_access_password_protected_url_with_wrong_password(self):
+        """Test accessing a password-protected URL with an incorrect password."""
+        with app.app_context():
+            # Create a password-protected URL directly in the database
+            url = URL(
+                short_code='SECURE3',
+                original_url='https://example.com/secure-content-3',
+                user_id=self.test_user_id,
+                password='secret123'
+            )
+            db.session.add(url)
+            db.session.commit()
+            
+            # Access with wrong password
+            response = self.app.get('/redirect?code=SECURE3&password=wrongpass')
+            
+            # Should return 401 Unauthorized
+            self.assertEqual(response.status_code, 401)
+            data = response.get_json()
+            self.assertEqual(data['error'], 'This URL is password-protected')
+    
+    def test_add_password_to_existing_url(self):
+        """Test adding password protection to an existing URL."""
+        # First create a URL without password
+        response = self.app.post('/shorten',
+                               json={'url': 'https://example.com/to-protect'},
+                               headers=self.headers)
+        
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        short_code = data['short_code']
+        
+        # Verify it's not password-protected
+        self.assertFalse(data['is_password_protected'])
+        
+        # Add password protection
+        edit_response = self.app.put('/edit',
+                                   json={'code': short_code, 'password': 'newpass123'},
+                                   headers=self.headers)
+        
+        self.assertEqual(edit_response.status_code, 200)
+        edit_data = edit_response.get_json()
+        
+        # Verify it's now password-protected
+        self.assertTrue(edit_data['is_password_protected'])
+        
+        # Try to access without password
+        access_response = self.app.get(f'/redirect?code={short_code}')
+        self.assertEqual(access_response.status_code, 401)
+        
+        # Try to access with password
+        access_response = self.app.get(f'/redirect?code={short_code}&password=newpass123')
+        self.assertEqual(access_response.status_code, 302)
+    
+    def test_remove_password_from_url(self):
+        """Test removing password protection from a URL."""
+        with app.app_context():
+            # Create a password-protected URL directly in the database
+            url = URL(
+                short_code='REMOVE',
+                original_url='https://example.com/remove-protection',
+                user_id=self.test_user_id,
+                password='secret123'
+            )
+            db.session.add(url)
+            db.session.commit()
+            
+            # Verify it requires a password
+            response = self.app.get('/redirect?code=REMOVE')
+            self.assertEqual(response.status_code, 401)
+            
+            # Remove password protection
+            edit_response = self.app.put('/edit',
+                                       json={'code': 'REMOVE', 'password': None},
+                                       headers=self.headers)
+            
+            self.assertEqual(edit_response.status_code, 200)
+            edit_data = edit_response.get_json()
+            
+            # Verify it's no longer password-protected
+            self.assertFalse(edit_data['is_password_protected'])
+            
+            # Verify it can now be accessed without a password
+            access_response = self.app.get('/redirect?code=REMOVE')
+            self.assertEqual(access_response.status_code, 302)
+    
+    def test_batch_create_with_password_protection(self):
+        """Test creating a batch of URLs including password-protected ones."""
+        # Create a batch of URLs, including a password-protected one
+        response = self.app.post('/shorten/batch',
+                               json={
+                                   'urls': [
+                                       {'url': 'https://example.com/batch1'},
+                                       {'url': 'https://example.com/batch2', 'password': 'batchpass'}
+                                   ]
+                               },
+                               headers=self.enterprise_headers)  # Only enterprise users can use batch
+        
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        
+        # Verify both URLs were created successfully
+        self.assertEqual(data['successful'], 2)
+        
+        # Find the password-protected URL in the results
+        password_protected_url = None
+        for result in data['results']:
+            if result['original_url'] == 'https://example.com/batch2':
+                password_protected_url = result
+                break
+        
+        # Verify it's marked as password-protected
+        self.assertIsNotNone(password_protected_url)
+        self.assertTrue(password_protected_url['is_password_protected'])
+
 if __name__ == '__main__':
     unittest.main()
