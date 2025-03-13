@@ -825,6 +825,133 @@ def update_user_tier(user_id):
         'message': f'User pricing tier updated to {pricing_tier}'
     })
 
+@app.route('/user/urls', methods=['GET'])
+def get_user_urls():
+    """Get all URLs for the authenticated user.
+    
+    This endpoint returns a list of all URLs created by the authenticated user,
+    including all details such as short code, original URL, creation date,
+    click count, expiry date, etc.
+    
+    Returns:
+        Response: JSON response with the list of URLs
+    """
+    # Get API key from request headers
+    api_key = request.headers.get('X-API-Key')
+    user = get_user_from_api_key(api_key)
+    
+    if not user:
+        return jsonify({'error': 'Invalid or missing API key'}), 401
+    
+    # Get pagination parameters
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 100, type=int)
+    
+    # Limit per_page to a reasonable value to prevent abuse
+    if per_page > 1000:
+        per_page = 1000
+    
+    # Get filter parameters
+    is_active = request.args.get('is_active', None)
+    is_deleted = request.args.get('is_deleted', None)
+    is_password_protected = request.args.get('is_password_protected', None)
+    sort_by = request.args.get('sort_by', 'created_at')
+    sort_order = request.args.get('sort_order', 'desc')
+    
+    # Build the query
+    query = URL.query.filter_by(user_id=user.id)
+    
+    # Apply filters if provided
+    if is_active is not None:
+        is_active = is_active.lower() == 'true'
+        if is_active:
+            # Active URLs: not expired and not deleted
+            query = query.filter(
+                (URL.expiry_date.is_(None) | (URL.expiry_date > datetime.utcnow())),
+                URL.is_deleted == False
+            )
+        else:
+            # Inactive URLs: expired or deleted
+            query = query.filter(
+                db.or_(
+                    URL.is_deleted == True,
+                    db.and_(URL.expiry_date.isnot(None), URL.expiry_date <= datetime.utcnow())
+                )
+            )
+    
+    if is_deleted is not None:
+        is_deleted = is_deleted.lower() == 'true'
+        query = query.filter(URL.is_deleted == is_deleted)
+    
+    if is_password_protected is not None:
+        is_password_protected = is_password_protected.lower() == 'true'
+        if is_password_protected:
+            query = query.filter(URL.password.isnot(None))
+        else:
+            query = query.filter(URL.password.is_(None))
+    
+    # Apply sorting
+    valid_sort_fields = {
+        'created_at': URL.created_at,
+        'last_accessed_at': URL.last_accessed_at,
+        'click_count': URL.click_count,
+        'short_code': URL.short_code,
+        'original_url': URL.original_url
+    }
+    
+    if sort_by in valid_sort_fields:
+        sort_field = valid_sort_fields[sort_by]
+        if sort_order.lower() == 'asc':
+            query = query.order_by(sort_field.asc())
+        else:
+            query = query.order_by(sort_field.desc())
+    else:
+        # Default sort by creation date, newest first
+        query = query.order_by(URL.created_at.desc())
+    
+    # Paginate the results
+    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+    urls = pagination.items
+    
+    # Format the response
+    results = []
+    for url in urls:
+        url_data = {
+            'short_code': url.short_code,
+            'original_url': url.original_url,
+            'short_url': f'http://localhost:5002/redirect?code={url.short_code}',
+            'created_at': url.created_at.isoformat(),
+            'click_count': url.click_count,
+            'last_accessed_at': url.last_accessed_at.isoformat() if url.last_accessed_at else None,
+            'is_deleted': url.is_deleted,
+            'deleted_at': url.deleted_at.isoformat() if url.deleted_at else None,
+            'expiry_date': url.expiry_date.isoformat() if url.expiry_date else None,
+            'timeout_seconds': url.timeout_seconds,
+            'is_password_protected': bool(url.password),
+            'is_active': not url.is_deleted and (url.expiry_date is None or url.expiry_date > datetime.utcnow())
+        }
+        results.append(url_data)
+    
+    # Add pagination metadata
+    response = {
+        'urls': results,
+        'pagination': {
+            'page': page,
+            'per_page': per_page,
+            'total_pages': pagination.pages,
+            'total_items': pagination.total
+        },
+        'filters': {
+            'is_active': is_active,
+            'is_deleted': is_deleted,
+            'is_password_protected': is_password_protected,
+            'sort_by': sort_by,
+            'sort_order': sort_order
+        }
+    }
+    
+    return jsonify(response)
+
 if __name__ == '__main__':
     with app.app_context():
         init_db()

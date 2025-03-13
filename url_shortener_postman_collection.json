@@ -7,6 +7,232 @@
 	},
 	"item": [
 		{
+			"name": "User URLs",
+			"item": [
+				{
+					"name": "Get All User URLs",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/user/urls",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"user",
+								"urls"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Active URLs",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/user/urls?is_active=true",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"user",
+								"urls"
+							],
+							"query": [
+								{
+									"key": "is_active",
+									"value": "true"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Password Protected URLs",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/user/urls?is_password_protected=true",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"user",
+								"urls"
+							],
+							"query": [
+								{
+									"key": "is_password_protected",
+									"value": "true"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Deleted URLs",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/user/urls?is_deleted=true",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"user",
+								"urls"
+							],
+							"query": [
+								{
+									"key": "is_deleted",
+									"value": "true"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Expired URLs",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/user/urls?is_expired=true",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"user",
+								"urls"
+							],
+							"query": [
+								{
+									"key": "is_expired",
+									"value": "true"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get URLs with Combined Filters",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/user/urls?is_active=true&is_password_protected=true",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"user",
+								"urls"
+							],
+							"query": [
+								{
+									"key": "is_active",
+									"value": "true"
+								},
+								{
+									"key": "is_password_protected",
+									"value": "true"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get URLs with Pagination",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "X-API-Key",
+								"value": "{{api_key}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/user/urls?page=1&per_page=50&sort_by=click_count&sort_order=desc",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"user",
+								"urls"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "per_page",
+									"value": "50"
+								},
+								{
+									"key": "sort_by",
+									"value": "click_count"
+								},
+								{
+									"key": "sort_order",
+									"value": "desc"
+								}
+							]
+						}
+					},
+					"response": []
+				}
+			],
+			"description": "Endpoints for managing user URLs"
+		},
+		{
 			"name": "User Management",
 			"item": [
 				{
