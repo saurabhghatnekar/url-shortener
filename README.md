@@ -193,6 +193,55 @@ Note: The application uses PostgreSQL as the database. Make sure to set up your 
      ```
    - See `/docs/batch_api.md` for detailed documentation
 
+7. **List User URLs**
+   - **GET** `/user/urls`
+   - Retrieves all URLs associated with the authenticated user
+   - Supports filtering and pagination
+   - Authentication: Requires API key in `X-API-Key` header
+   - Query Parameters:
+     - `is_active` (optional): Filter by active status (true/false)
+     - `is_deleted` (optional): Filter by deletion status (true/false)
+     - `is_expired` (optional): Filter by expiration status (true/false)
+     - `is_password_protected` (optional): Filter by password protection (true/false)
+     - `page` (optional): Page number for pagination (default: 1)
+     - `per_page` (optional): Number of results per page (default: 10)
+   - Example:
+     ```bash
+     curl -H "X-API-Key: your_api_key" \
+          http://localhost:5002/user/urls?is_active=true&is_password_protected=true
+     ```
+   - Response:
+     ```json
+     {
+       "urls": [
+         {
+           "short_code": "abc123",
+           "original_url": "https://example.com",
+           "short_url": "http://localhost:5002/redirect?code=abc123",
+           "created_at": "2025-03-13T14:30:00Z",
+           "click_count": 42,
+           "last_accessed_at": "2025-03-13T16:45:00Z",
+           "is_active": true,
+           "is_deleted": false,
+           "deleted_at": null,
+           "expiry_date": null,
+           "timeout_seconds": 3600,
+           "is_password_protected": true
+         }
+       ],
+       "pagination": {
+         "page": 1,
+         "per_page": 10,
+         "total_pages": 1,
+         "total_items": 1
+       },
+       "filters": {
+         "is_active": true,
+         "is_password_protected": true
+       }
+     }
+     ```
+
 ## Performance Testing
 
 To test the performance of the application, you can use `oha` to simulate traffic. Below are the results from testing the `/shorten` and `/redirect` endpoints with 10 simultaneous requests:
@@ -268,6 +317,9 @@ Key features:
 - User management and API key authentication
 - Soft delete functionality
 - Timestamps in UTC
+- Enterprise user URL listing with filtering options
+- Password protection for sensitive URLs
+- Batch URL shortening for bulk operations
 
 ## Running Tests
 
@@ -289,6 +341,7 @@ Key test cases:
 - URL timeout functionality
 - Batch URL shortening
 - API key authentication
+- User URL listing with filtering options
 
 ## Features
 
@@ -300,6 +353,12 @@ Key test cases:
 ### URL Expiration
 - Set an expiry date for URLs that should only be valid for a limited time
 - Expired URLs return a 410 Gone status code
+
+### URL Listing for Enterprise Users
+- Retrieve all URLs associated with your account in one request
+- Filter URLs by status (active, deleted, expired, password-protected)
+- Paginated results for efficient handling of large URL collections
+- Comprehensive URL details including creation date, click count, and more
 - ISO format date strings for easy integration
 
 ### URL Timeout

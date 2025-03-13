@@ -1,6 +1,8 @@
 import unittest
 import tempfile
 import os
+import random
+import string
 from datetime import datetime, timedelta
 
 # Set the testing environment variable
@@ -1097,6 +1099,92 @@ class URLShortenerTestCase(unittest.TestCase):
         # Verify it's marked as password-protected
         self.assertIsNotNone(password_protected_url)
         self.assertTrue(password_protected_url['is_password_protected'])
+        
+    def test_get_user_urls(self):
+        """Test retrieving all URLs for a user."""
+        # First create several URLs for the user with distinct original URLs to identify them
+        test_id = ''.join(random.choices(string.ascii_lowercase, k=6))  # Generate a unique identifier
+        
+        # Create URLs with different properties
+        urls_to_create = [
+            {'url': f'https://example.com/list1-{test_id}'},
+            {'url': f'https://example.com/list2-{test_id}', 'password': 'listpass'},
+            {'url': f'https://example.com/list3-{test_id}', 'expiry_date': (datetime.utcnow() + timedelta(days=30)).isoformat()}
+        ]
+        
+        # Create the URLs and store the responses
+        created_urls = []
+        for url_data in urls_to_create:
+            response = self.app.post('/shorten', json=url_data, headers=self.headers)
+            self.assertEqual(response.status_code, 200, f"Failed to create URL: {response.get_json()}")
+            created_urls.append(response.get_json())
+        
+        # Mark one URL as deleted to test inactive URLs
+        deleted_short_code = created_urls[2]['short_code']
+        delete_response = self.app.delete(f'/delete?code={deleted_short_code}', headers=self.headers)
+        self.assertEqual(delete_response.status_code, 200, "Failed to delete URL")
+        
+        # Now retrieve all URLs for the user (default query returns all active URLs)
+        response = self.app.get('/user/urls', headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        
+        # Check that the response contains the expected structure
+        self.assertIn('urls', data)
+        self.assertIn('pagination', data)
+        self.assertIn('filters', data)
+        
+        # Verify pagination information
+        self.assertEqual(data['pagination']['page'], 1)
+        
+        # Get all original URLs from the response
+        returned_urls = [url['original_url'] for url in data['urls']]
+        
+        # Verify that the active URLs are in the response
+        # The first two URLs should be returned in the default query
+        for i in range(2):
+            url_data = urls_to_create[i]
+            self.assertTrue(any(url_data['url'] == returned_url for returned_url in returned_urls), 
+                          f"URL {url_data['url']} not found in response")
+        
+        # Now specifically request inactive (deleted) URLs
+        inactive_response = self.app.get('/user/urls?is_deleted=true', headers=self.headers)
+        self.assertEqual(inactive_response.status_code, 200)
+        inactive_data = inactive_response.get_json()
+        
+        # Get all original URLs from the inactive response
+        inactive_urls = [url['original_url'] for url in inactive_data['urls']]
+        
+        # The deleted URL should be in the inactive URLs response
+        deleted_url = urls_to_create[2]['url']
+        self.assertTrue(any(deleted_url == url for url in inactive_urls),
+                      f"Deleted URL {deleted_url} not found in inactive URLs response")
+        
+        # Verify that the URLs contain all expected fields
+        expected_fields = [
+            'short_code', 'original_url', 'short_url', 'created_at', 'click_count',
+            'last_accessed_at', 'is_deleted', 'deleted_at', 'expiry_date',
+            'timeout_seconds', 'is_password_protected', 'is_active'
+        ]
+        
+        for field in expected_fields:
+            self.assertIn(field, data['urls'][0])
+        
+        # Test filtering for active URLs only
+        active_response = self.app.get('/user/urls?is_active=true', headers=self.headers)
+        active_data = active_response.get_json()
+        
+        # All URLs in the response should be active
+        for url in active_data['urls']:
+            self.assertTrue(url['is_active'])
+        
+        # Test filtering for password-protected URLs
+        password_response = self.app.get('/user/urls?is_password_protected=true', headers=self.headers)
+        password_data = password_response.get_json()
+        
+        # All URLs in the response should be password-protected
+        for url in password_data['urls']:
+            self.assertTrue(url['is_password_protected'])
 
 if __name__ == '__main__':
     unittest.main()
