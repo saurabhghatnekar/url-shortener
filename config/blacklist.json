@@ -1,0 +1,6 @@
+{
+  "blacklisted_api_keys": [],
+  "blacklisted_ips": [],
+  "last_updated": "2025-04-12T12:57:00+05:30",
+  "notes": "This file contains blacklisted API keys and IPs. Add entries to block abusive users."
+}

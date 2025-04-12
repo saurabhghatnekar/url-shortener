@@ -18,20 +18,30 @@ import base64
 
 import os
 
+# Initialize Flask app
 app = Flask(__name__)
 app.template_folder = os.path.abspath(os.path.join(os.path.dirname(__file__), 'templates'))
 
-# Check if we're in a testing environment
-if os.environ.get('TESTING') == 'True':
-    # Use SQLite in-memory database for testing
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
+# Check if we should force SQLite usage
+if os.environ.get('USE_SQLITE') == 'True':
+    # Force SQLite for local development
+    sqlite_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'url_shortener.db')
+    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{sqlite_path}'
+    print(f"Using SQLite database at: {sqlite_path}")
+# Otherwise use the DATABASE_URL if provided
+elif os.environ.get('DATABASE_URL'):
+    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
+    print(f"Using database from DATABASE_URL")
+# Default to SQLite
 else:
-    # Use environment variable for database URI if available, otherwise use the PostgreSQL URI
-    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
-        'DATABASE_URL',
-        'postgresql://neondb_owner:npg_8LqUgf2eYSid@ep-billowing-sunset-a5goac87-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require'
-    )
+    # Use SQLite for local development
+    sqlite_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'url_shortener.db')
+    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{sqlite_path}'
+    print(f"Using default SQLite database at: {sqlite_path}")
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['TESTING'] = os.environ.get('TESTING', 'False') == 'True'
+
 # Configure main application logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -97,7 +107,7 @@ AUTH_EXEMPT_ROUTES = {
     '/api/health'     # Health check routes
 }
 
-# Routes that require enterprise tier
+# List of routes that require enterprise tier
 ENTERPRISE_TIER_ROUTES = {
     '/shorten/batch',  # Batch URL shortening
     '/analytics/advanced',  # Advanced analytics (future feature)
@@ -127,6 +137,132 @@ def requires_enterprise_tier(path):
         if path.startswith(enterprise_route):
             return True
     return False
+
+# Path to the blacklist configuration file
+BLACKLIST_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'blacklist.json')
+
+# Cache for blacklisted API keys and IPs
+blacklist_cache = {
+    'api_keys': set(),
+    'ips': set(),
+    'last_loaded': None
+}
+
+# Allow tests to override the blacklist path
+def get_blacklist_path():
+    """Get the path to the blacklist configuration file.
+    
+    This function allows tests to override the blacklist path by setting
+    app.config['BLACKLIST_CONFIG_PATH'].
+    """
+    if app.config.get('BLACKLIST_CONFIG_PATH'):
+        return app.config.get('BLACKLIST_CONFIG_PATH')
+    return BLACKLIST_CONFIG_PATH
+
+# Function to load the blacklist from the configuration file
+def load_blacklist(force_reload=False):
+    """Load the blacklist from the configuration file.
+    
+    Args:
+        force_reload (bool): If True, reload the blacklist even if it was recently loaded.
+        
+    Returns:
+        dict: A dictionary containing blacklisted API keys and IPs.
+    """
+    global blacklist_cache
+    
+    # Check if we need to reload the blacklist
+    current_time = datetime.utcnow()
+    if not force_reload and blacklist_cache['last_loaded'] and \
+       (current_time - blacklist_cache['last_loaded']).total_seconds() < 60:
+        # Use cached blacklist if it was loaded less than 60 seconds ago
+        return blacklist_cache
+    
+    try:
+        # Get the blacklist path (allows for testing override)
+        blacklist_path = get_blacklist_path()
+        
+        # Create the config directory if it doesn't exist
+        os.makedirs(os.path.dirname(blacklist_path), exist_ok=True)
+        
+        # Create the blacklist file with default values if it doesn't exist
+        if not os.path.exists(blacklist_path):
+            default_blacklist = {
+                "blacklisted_api_keys": [],
+                "blacklisted_ips": [],
+                "last_updated": datetime.utcnow().isoformat(),
+                "notes": "This file contains blacklisted API keys and IPs. Add entries to block abusive users."
+            }
+            with open(blacklist_path, 'w') as f:
+                json.dump(default_blacklist, f, indent=2)
+        
+        # Load the blacklist from the file
+        with open(blacklist_path, 'r') as f:
+            blacklist_data = json.load(f)
+        
+        # Update the cache
+        blacklist_cache['api_keys'] = set(blacklist_data.get('blacklisted_api_keys', []))
+        blacklist_cache['ips'] = set(blacklist_data.get('blacklisted_ips', []))
+        blacklist_cache['last_loaded'] = current_time
+        
+        app.logger.info(f"Loaded blacklist with {len(blacklist_cache['api_keys'])} API keys and {len(blacklist_cache['ips'])} IPs")
+        return blacklist_cache
+    except Exception as e:
+        app.logger.error(f"Error loading blacklist: {str(e)}")
+        # Return the current cache if there's an error
+        return blacklist_cache
+
+    # Blacklist middleware
+    @app.before_request
+    def check_blacklist():
+        """Check if the request's API key or IP is blacklisted."""
+        # Skip for OPTIONS requests (pre-flight CORS requests)
+        if request.method == 'OPTIONS':
+            return None
+        
+        # Load the blacklist
+        blacklist = load_blacklist()
+        
+        # Check if the API key is blacklisted
+        api_key = request.headers.get('X-API-Key')
+        if api_key and api_key in blacklist['api_keys']:
+            app.logger.warning(f"Blocked request with blacklisted API key: {api_key[:5]}...")
+            return jsonify({
+                'error': 'Your API key has been blacklisted. Please contact support for assistance.',
+                'code': 'BLACKLISTED_API_KEY'
+            }), 403
+        
+        # Check if the IP is blacklisted
+        if request.headers.getlist("X-Forwarded-For"):
+            ip = request.headers.getlist("X-Forwarded-For")[0]
+        else:
+            ip = request.remote_addr
+        
+        if ip in blacklist['ips']:
+            app.logger.warning(f"Blocked request from blacklisted IP: {ip}")
+            return jsonify({
+                'error': 'Your IP address has been blacklisted. Please contact support for assistance.',
+                'code': 'BLACKLISTED_IP'
+            }), 403
+
+# Response time middleware
+@app.before_request
+def start_timer():
+    """Store the start time of the request."""
+    g.start_time = datetime.utcnow()
+
+@app.after_request
+def add_response_time(response):
+    """Calculate response time and add it to response headers."""
+    # Check if we have a start time
+    if hasattr(g, 'start_time'):
+        # Calculate response time in milliseconds
+        response_time = (datetime.utcnow() - g.start_time).total_seconds() * 1000
+        # Add response time to headers (rounded to 2 decimal places)
+        response.headers['X-Response-Time'] = f"{response_time:.2f}ms"
+        # Log response time for monitoring
+        app.logger.debug(f"Response time: {response_time:.2f}ms for {request.method} {request.path}")
+    return response
 
 # API key validation middleware
 @app.before_request
@@ -290,6 +426,7 @@ class User(db.Model):
     name = db.Column(db.String, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     pricing_tier = db.Column(db.String, default='hobby', nullable=False)  # 'hobby' or 'enterprise'
+    role = db.Column(db.String, default='user', nullable=False)  # 'user', 'admin', etc.
 
     def __repr__(self):
         return f'<User {self.email}>'
@@ -1309,6 +1446,83 @@ def view_request_logs():
                                   'start_date': start_date,
                                   'end_date': end_date
                               })
+
+@app.route('/admin/blacklist', methods=['GET', 'POST'])
+def manage_blacklist():
+    """View and manage the blacklist."""
+    # Check if the user is an admin
+    if not hasattr(g, 'user') or g.user.role != 'admin':
+        return jsonify({'error': 'Access denied. Admin privileges required.'}), 403
+    
+    if request.method == 'POST':
+        try:
+            # Get the blacklist path
+            blacklist_path = get_blacklist_path()
+            
+            # Load the current blacklist
+            with open(blacklist_path, 'r') as f:
+                blacklist_data = json.load(f)
+            
+            # Update the blacklist based on the form data
+            action = request.form.get('action')
+            item_type = request.form.get('type')
+            value = request.form.get('value')
+            
+            if not action or not item_type or not value:
+                return jsonify({'error': 'Missing required fields'}), 400
+            
+            if item_type not in ['api_key', 'ip']:
+                return jsonify({'error': 'Invalid item type'}), 400
+            
+            if action == 'add':
+                # Add the item to the blacklist
+                if item_type == 'api_key':
+                    if value not in blacklist_data['blacklisted_api_keys']:
+                        blacklist_data['blacklisted_api_keys'].append(value)
+                else:  # ip
+                    if value not in blacklist_data['blacklisted_ips']:
+                        blacklist_data['blacklisted_ips'].append(value)
+            elif action == 'remove':
+                # Remove the item from the blacklist
+                if item_type == 'api_key':
+                    if value in blacklist_data['blacklisted_api_keys']:
+                        blacklist_data['blacklisted_api_keys'].remove(value)
+                else:  # ip
+                    if value in blacklist_data['blacklisted_ips']:
+                        blacklist_data['blacklisted_ips'].remove(value)
+            else:
+                return jsonify({'error': 'Invalid action'}), 400
+            
+            # Update the last_updated timestamp
+            blacklist_data['last_updated'] = datetime.utcnow().isoformat()
+            
+            # Save the updated blacklist
+            with open(blacklist_path, 'w') as f:
+                json.dump(blacklist_data, f, indent=2)
+            
+            # Force reload the blacklist
+            load_blacklist(force_reload=True)
+            
+            return jsonify({'success': True, 'message': f'{item_type} {action}ed successfully'}), 200
+        except Exception as e:
+            app.logger.error(f"Error updating blacklist: {str(e)}")
+            return jsonify({'error': f'Error updating blacklist: {str(e)}'}), 500
+    else:  # GET request
+        try:
+            # Get the blacklist path
+            blacklist_path = get_blacklist_path()
+            
+            # Load the blacklist
+            with open(blacklist_path, 'r') as f:
+                blacklist_data = json.load(f)
+            
+            # Render the blacklist management page
+            return render_template('blacklist.html', 
+                                 blacklist=blacklist_data,
+                                 last_updated=blacklist_data.get('last_updated', 'Unknown'))
+        except Exception as e:
+            app.logger.error(f"Error loading blacklist: {str(e)}")
+            return jsonify({'error': f'Error loading blacklist: {str(e)}'}), 500
 
 if __name__ == '__main__':
     with app.app_context():
