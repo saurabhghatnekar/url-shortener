@@ -61,7 +61,7 @@ db = SQLAlchemy(app)
 # Initialize Flask-Migrate
 migrate = Migrate(app, db)
 
-# List of routes to log (you can customize this list)
+# List of routes to log
 LOGGED_ROUTES = [
     '/shorten',       # Log the URL shortening endpoint
     '/redirect',      # Log the URL redirection endpoint
@@ -97,6 +97,13 @@ AUTH_EXEMPT_ROUTES = {
     '/api/health'     # Health check routes
 }
 
+# Routes that require enterprise tier
+ENTERPRISE_TIER_ROUTES = {
+    '/shorten/batch',  # Batch URL shortening
+    '/analytics/advanced',  # Advanced analytics (future feature)
+    '/api/v2'  # Future API endpoints
+}
+
 # Function to check if the current route requires API key validation
 def requires_api_key(path, method):
     # Skip API key validation for exempt routes
@@ -111,6 +118,14 @@ def requires_api_key(path, method):
             if method in AUTH_REQUIRED_METHODS:
                 return True
     
+    return False
+
+# Function to check if the current route requires enterprise tier
+def requires_enterprise_tier(path):
+    # Check if the path requires enterprise tier
+    for enterprise_route in ENTERPRISE_TIER_ROUTES:
+        if path.startswith(enterprise_route):
+            return True
     return False
 
 # API key validation middleware
@@ -138,6 +153,29 @@ def validate_api_key():
         
         # Store user in Flask's g object for the route handler to use
         g.user = user
+
+# Enterprise tier authorization middleware
+@app.before_request
+def validate_enterprise_tier():
+    # Skip if no user is authenticated yet
+    if not hasattr(g, 'user'):
+        return None
+    
+    # Extract path from URL
+    parsed_url = urlparse(request.url)
+    path = parsed_url.path
+    
+    # Check if this route requires enterprise tier
+    if requires_enterprise_tier(path):
+        user = g.user
+        
+        # Check if the user has the enterprise tier
+        if user.pricing_tier != 'enterprise':
+            return jsonify({
+                'error': 'Access denied. This feature is only available for enterprise tier users.',
+                'current_tier': user.pricing_tier,
+                'required_tier': 'enterprise'
+            }), 403
 
 # Request logging middleware
 @app.before_request
@@ -547,17 +585,16 @@ def shorten_url():
 
 @app.route('/shorten/batch', methods=['POST'])
 def shorten_urls_batch():
-    """Shorten multiple URLs in a single request."""
-    # User is already validated and available in g.user thanks to the middleware
-    user = g.user
+    """Shorten multiple URLs in a single request.
     
-    # Check if the user has the enterprise tier
-    if user.pricing_tier != 'enterprise':
-        return jsonify({
-            'error': 'Access denied. Batch URL shortening is only available for enterprise tier users.',
-            'current_tier': user.pricing_tier,
-            'required_tier': 'enterprise'
-        }), 403
+    This endpoint allows enterprise tier users to create multiple short URLs in a single request.
+    It accepts a list of URL objects, each with the same parameters as the single URL endpoint.
+    
+    Enterprise tier authorization is handled by the validate_enterprise_tier middleware.
+    """
+    # User is already validated and available in g.user thanks to the middleware
+    # Enterprise tier validation is also handled by middleware
+    user = g.user
     
     # Get the list of URL data from the request
     urls_data = request.json.get('urls')
