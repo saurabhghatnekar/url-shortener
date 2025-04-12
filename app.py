@@ -61,33 +61,56 @@ db = SQLAlchemy(app)
 # Initialize Flask-Migrate
 migrate = Migrate(app, db)
 
+# List of routes to log (you can customize this list)
+LOGGED_ROUTES = [
+    '/shorten',       # Log the URL shortening endpoint
+    '/redirect',      # Log the URL redirection endpoint
+    '/edit',          # Log the URL editing endpoint
+    '/delete',        # Log the URL deletion endpoint
+    '/shorten/batch'  # Log the batch URL shortening endpoint
+]
+
+# Function to check if the current route should be logged
+def should_log_route(path):
+    # Check if the path starts with any of the routes in LOGGED_ROUTES
+    for route in LOGGED_ROUTES:
+        if path.startswith(route):
+            return True
+    return False
+
 # Request logging middleware
 @app.before_request
 def log_request_info():
     # Get the start time for the request
     g.start_time = datetime.utcnow()
     
-    # Get client IP address
-    if request.headers.getlist("X-Forwarded-For"):
-        # If behind a proxy, get the real IP
-        ip = request.headers.getlist("X-Forwarded-For")[0]
-    else:
-        ip = request.remote_addr
-    
     # Extract path from URL
     parsed_url = urlparse(request.url)
     path = parsed_url.path
     
-    # Log the request details to file
-    request_logger.info(
-        f"IP: {ip} | "
-        f"Method: {request.method} | "
-        f"URL: {request.url} | "
-        f"Path: {path} | "
-        f"User-Agent: {request.headers.get('User-Agent', 'Unknown')}"
-    )
-    
-    # We'll create the database entry in after_request when we have the status code and response time
+    # Only log specific routes
+    if should_log_route(path):
+        # Get client IP address
+        if request.headers.getlist("X-Forwarded-For"):
+            # If behind a proxy, get the real IP
+            ip = request.headers.getlist("X-Forwarded-For")[0]
+        else:
+            ip = request.remote_addr
+        
+        # Log the request details to file
+        request_logger.info(
+            f"IP: {ip} | "
+            f"Method: {request.method} | "
+            f"URL: {request.url} | "
+            f"Path: {path} | "
+            f"User-Agent: {request.headers.get('User-Agent', 'Unknown')}"
+        )
+        
+        # Mark this request for logging in the database
+        g.should_log = True
+    else:
+        # Don't log this request
+        g.should_log = False
 
 # Enable CORS for SSE
 @app.after_request
@@ -97,8 +120,8 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
     response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
     
-    # Log response time if we have a start time
-    if hasattr(g, 'start_time'):
+    # Only log if we have a start time and this request should be logged
+    if hasattr(g, 'start_time') and hasattr(g, 'should_log') and g.should_log:
         # Calculate response time
         response_time = datetime.utcnow() - g.start_time
         response_time_seconds = response_time.total_seconds()
