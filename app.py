@@ -1,4 +1,4 @@
-from flask import Flask, request, redirect, jsonify, Response, render_template, copy_current_request_context
+from flask import Flask, request, redirect, jsonify, Response, render_template, copy_current_request_context, g
 import string
 import random
 import re
@@ -11,6 +11,8 @@ import json
 from threading import Event, Thread
 from time import sleep
 import logging
+from logging.handlers import RotatingFileHandler
+import os.path
 from cryptography.fernet import Fernet
 import base64
 
@@ -30,20 +32,111 @@ else:
         'postgresql://neondb_owner:npg_8LqUgf2eYSid@ep-billowing-sunset-a5goac87-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require'
     )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# Configure main application logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Configure request logger
+request_logger = logging.getLogger('request_logger')
+request_logger.setLevel(logging.INFO)
+
+# Create logs directory if it doesn't exist
+logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(logs_dir, exist_ok=True)
+
+# Set up file handler for request logs
+request_log_file = os.path.join(logs_dir, 'request_logs.log')
+request_file_handler = RotatingFileHandler(request_log_file, maxBytes=10485760, backupCount=10)  # 10MB per file, keep 10 files
+request_file_handler.setLevel(logging.INFO)
+
+# Create a formatter for the logs
+request_formatter = logging.Formatter('%(asctime)s - %(message)s')
+request_file_handler.setFormatter(request_formatter)
+
+# Add the handler to the logger
+request_logger.addHandler(request_file_handler)
 
 db = SQLAlchemy(app)
 
 # Initialize Flask-Migrate
 migrate = Migrate(app, db)
 
+# Request logging middleware
+@app.before_request
+def log_request_info():
+    # Get the start time for the request
+    g.start_time = datetime.utcnow()
+    
+    # Get client IP address
+    if request.headers.getlist("X-Forwarded-For"):
+        # If behind a proxy, get the real IP
+        ip = request.headers.getlist("X-Forwarded-For")[0]
+    else:
+        ip = request.remote_addr
+    
+    # Extract path from URL
+    parsed_url = urlparse(request.url)
+    path = parsed_url.path
+    
+    # Log the request details to file
+    request_logger.info(
+        f"IP: {ip} | "
+        f"Method: {request.method} | "
+        f"URL: {request.url} | "
+        f"Path: {path} | "
+        f"User-Agent: {request.headers.get('User-Agent', 'Unknown')}"
+    )
+    
+    # We'll create the database entry in after_request when we have the status code and response time
+
 # Enable CORS for SSE
 @app.after_request
 def after_request(response):
+    # Add CORS headers
     response.headers.add('Access-Control-Allow-Origin', '*')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
     response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    
+    # Log response time if we have a start time
+    if hasattr(g, 'start_time'):
+        # Calculate response time
+        response_time = datetime.utcnow() - g.start_time
+        response_time_seconds = response_time.total_seconds()
+        
+        # Log to file
+        request_logger.info(f"Response time: {response_time_seconds:.3f}s | Status: {response.status_code}")
+        
+        # Get client IP address
+        if request.headers.getlist("X-Forwarded-For"):
+            ip = request.headers.getlist("X-Forwarded-For")[0]
+        else:
+            ip = request.remote_addr
+        
+        # Extract path from URL
+        parsed_url = urlparse(request.url)
+        path = parsed_url.path
+        
+        try:
+            # Create database log entry
+            log_entry = RequestLog(
+                timestamp=g.start_time,
+                method=request.method,
+                url=request.url,
+                path=path,
+                user_agent=request.headers.get('User-Agent'),
+                ip_address=ip,
+                status_code=response.status_code,
+                response_time=response_time_seconds
+            )
+            
+            # Add to session and commit
+            db.session.add(log_entry)
+            db.session.commit()
+        except Exception as e:
+            # If there's an error saving to the database, log it but don't break the request
+            logger.error(f"Error saving request log to database: {str(e)}")
+            db.session.rollback()
+    
     return response
 
 # Queue for SSE events
@@ -118,13 +211,14 @@ class URL(db.Model):
 
 class APIKey(db.Model):
     __tablename__ = 'api_keys'
+
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    encrypted_key = db.Column(db.LargeBinary, unique=True, nullable=False)
+    encrypted_key = db.Column(db.LargeBinary, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    is_deleted = db.Column(db.Boolean, default=False)
-    deleted_at = db.Column(db.DateTime, nullable=True)
-
+    last_used_at = db.Column(db.DateTime, nullable=True)
+    is_active = db.Column(db.Boolean, default=True)
+    
     # Define the relationship with the User model
     user = db.relationship('User', backref=db.backref('api_keys', lazy=True))
     
@@ -137,10 +231,26 @@ class APIKey(db.Model):
     def key(self, value):
         """Encrypt and store the API key."""
         self.encrypted_key = encrypt_api_key(value)
-
-    def __repr__(self):
-        return f'<APIKey for user {self.user_id}>'
     
+    def __repr__(self):
+        return f'<APIKey {self.id}>'
+
+class RequestLog(db.Model):
+    __tablename__ = 'request_logs'
+    
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    method = db.Column(db.String(10), nullable=False)  # GET, POST, PUT, DELETE, etc.
+    url = db.Column(db.String(2048), nullable=False)   # Full URL including query parameters
+    path = db.Column(db.String(1024), nullable=False)  # URL path without query parameters
+    user_agent = db.Column(db.String(1024), nullable=True)
+    ip_address = db.Column(db.String(45), nullable=True)  # IPv4 or IPv6 address
+    status_code = db.Column(db.Integer, nullable=True)  # HTTP status code of the response
+    response_time = db.Column(db.Float, nullable=True)  # Response time in seconds
+    
+    def __repr__(self):
+        return f'<RequestLog {self.id} - {self.method} {self.path}>'
+
 def init_db():
     """Initialize the database with sample data."""
     # Create tables if they don't exist
@@ -951,6 +1061,145 @@ def get_user_urls():
     }
     
     return jsonify(response)
+
+@app.route('/admin/logs', methods=['GET'])
+def view_request_logs():
+    """View request logs with optional filtering.
+    
+    Query parameters:
+    - path: Filter logs by path
+    - method: Filter logs by HTTP method
+    - status_code: Filter logs by status code
+    - ip: Filter logs by IP address
+    - start_date: Filter logs after this date (format: YYYY-MM-DD)
+    - end_date: Filter logs before this date (format: YYYY-MM-DD)
+    - limit: Maximum number of logs to return (default: 100)
+    - format: Response format ('json' or 'html', default: 'html')
+    """
+    # Get query parameters for filtering
+    path_filter = request.args.get('path')
+    method_filter = request.args.get('method')
+    status_filter = request.args.get('status_code')
+    ip_filter = request.args.get('ip')
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    limit = request.args.get('limit', 100, type=int)
+    format_type = request.args.get('format', 'html')
+    
+    # Read log file
+    logs = []
+    try:
+        log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', 'request_logs.log')
+        with open(log_file_path, 'r') as f:
+            for line in f:
+                try:
+                    # Parse log line
+                    if ' - IP: ' in line:
+                        # This is a request line
+                        timestamp_str = line.split(' - ', 1)[0]
+                        details = line.split(' - ', 1)[1].strip()
+                        
+                        # Extract information using regex
+                        ip_match = re.search(r'IP: ([\d\.]+)', details)
+                        method_match = re.search(r'Method: (\w+)', details)
+                        url_match = re.search(r'URL: ([^\|]+)', details)
+                        path_match = re.search(r'Path: ([^\|]+)', details)
+                        user_agent_match = re.search(r'User-Agent: ([^\|]+)', details)
+                        
+                        if ip_match and method_match and url_match:
+                            log_entry = {
+                                'timestamp': timestamp_str,
+                                'ip': ip_match.group(1).strip(),
+                                'method': method_match.group(1).strip(),
+                                'url': url_match.group(1).strip(),
+                                'path': path_match.group(1).strip() if path_match else '',
+                                'user_agent': user_agent_match.group(1).strip() if user_agent_match else '',
+                                'status_code': None,
+                                'response_time': None
+                            }
+                            logs.append(log_entry)
+                    elif ' - Response time: ' in line:
+                        # This is a response line, update the previous request
+                        if logs:
+                            timestamp_str = line.split(' - ', 1)[0]
+                            details = line.split(' - ', 1)[1].strip()
+                            
+                            response_time_match = re.search(r'Response time: ([\d\.]+)s', details)
+                            status_match = re.search(r'Status: (\d+)', details)
+                            
+                            if response_time_match and status_match and logs:
+                                logs[-1]['response_time'] = float(response_time_match.group(1))
+                                logs[-1]['status_code'] = int(status_match.group(1))
+                except Exception as e:
+                    logger.error(f"Error parsing log line: {str(e)}")
+                    continue
+    except Exception as e:
+        logger.error(f"Error reading log file: {str(e)}")
+        return jsonify({'error': 'Error reading log file'}), 500
+    
+    # Apply filters
+    filtered_logs = logs
+    
+    if path_filter:
+        filtered_logs = [log for log in filtered_logs if path_filter in log['path']]
+    
+    if method_filter:
+        filtered_logs = [log for log in filtered_logs if log['method'].upper() == method_filter.upper()]
+    
+    if status_filter:
+        status_code = int(status_filter)
+        filtered_logs = [log for log in filtered_logs if log['status_code'] == status_code]
+    
+    if ip_filter:
+        filtered_logs = [log for log in filtered_logs if ip_filter in log['ip']]
+    
+    if start_date:
+        try:
+            start_datetime = datetime.strptime(start_date, '%Y-%m-%d')
+            filtered_logs = [log for log in filtered_logs if datetime.strptime(log['timestamp'].split(',')[0], '%Y-%m-%d %H:%M:%S') >= start_datetime]
+        except ValueError:
+            pass
+    
+    if end_date:
+        try:
+            end_datetime = datetime.strptime(end_date, '%Y-%m-%d')
+            filtered_logs = [log for log in filtered_logs if datetime.strptime(log['timestamp'].split(',')[0], '%Y-%m-%d %H:%M:%S') <= end_datetime]
+        except ValueError:
+            pass
+    
+    # Sort logs by timestamp (newest first)
+    filtered_logs.reverse()
+    
+    # Limit the number of logs
+    filtered_logs = filtered_logs[:limit]
+    
+    # Return response in requested format
+    if format_type == 'json':
+        return jsonify({
+            'logs': filtered_logs,
+            'total': len(filtered_logs),
+            'filters': {
+                'path': path_filter,
+                'method': method_filter,
+                'status_code': status_filter,
+                'ip': ip_filter,
+                'start_date': start_date,
+                'end_date': end_date
+            }
+        })
+    else:
+        # HTML format
+        return render_template('logs.html', 
+                              logs=filtered_logs, 
+                              total=len(filtered_logs),
+                              filters={
+                                  'path': path_filter,
+                                  'method': method_filter,
+                                  'status_code': status_filter,
+                                  'ip': ip_filter,
+                                  'start_date': start_date,
+                                  'end_date': end_date
+                              })
 
 if __name__ == '__main__':
     with app.app_context():

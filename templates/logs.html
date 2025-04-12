@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Request Logs - URL Shortener</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+        .filters {
+            background-color: #f9f9f9;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+            border: 1px solid #ddd;
+        }
+        .filter-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .filter-group {
+            flex: 1;
+            min-width: 200px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+        input, select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        tr:hover {
+            background-color: #f5f5f5;
+        }
+        .status-2xx {
+            color: #4CAF50;
+            font-weight: bold;
+        }
+        .status-3xx {
+            color: #2196F3;
+            font-weight: bold;
+        }
+        .status-4xx {
+            color: #FF9800;
+            font-weight: bold;
+        }
+        .status-5xx {
+            color: #F44336;
+            font-weight: bold;
+        }
+        .pagination {
+            margin-top: 20px;
+            text-align: center;
+        }
+        .pagination a {
+            color: black;
+            padding: 8px 16px;
+            text-decoration: none;
+            transition: background-color .3s;
+            border: 1px solid #ddd;
+            margin: 0 4px;
+        }
+        .pagination a.active {
+            background-color: #4CAF50;
+            color: white;
+            border: 1px solid #4CAF50;
+        }
+        .pagination a:hover:not(.active) {
+            background-color: #ddd;
+        }
+        .summary {
+            margin-bottom: 20px;
+            font-size: 16px;
+        }
+        .export-links {
+            margin-top: 10px;
+            text-align: right;
+        }
+        .export-links a {
+            margin-left: 10px;
+            color: #2196F3;
+            text-decoration: none;
+        }
+        .export-links a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Request Logs</h1>
+        
+        <div class="filters">
+            <form action="/admin/logs" method="get">
+                <div class="filter-row">
+                    <div class="filter-group">
+                        <label for="path">Path:</label>
+                        <input type="text" id="path" name="path" value="{{ filters.path or '' }}" placeholder="Filter by path">
+                    </div>
+                    <div class="filter-group">
+                        <label for="method">Method:</label>
+                        <select id="method" name="method">
+                            <option value="">All Methods</option>
+                            <option value="GET" {% if filters.method == 'GET' %}selected{% endif %}>GET</option>
+                            <option value="POST" {% if filters.method == 'POST' %}selected{% endif %}>POST</option>
+                            <option value="PUT" {% if filters.method == 'PUT' %}selected{% endif %}>PUT</option>
+                            <option value="DELETE" {% if filters.method == 'DELETE' %}selected{% endif %}>DELETE</option>
+                            <option value="OPTIONS" {% if filters.method == 'OPTIONS' %}selected{% endif %}>OPTIONS</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="status_code">Status Code:</label>
+                        <input type="text" id="status_code" name="status_code" value="{{ filters.status_code or '' }}" placeholder="e.g., 200, 404">
+                    </div>
+                </div>
+                <div class="filter-row">
+                    <div class="filter-group">
+                        <label for="ip">IP Address:</label>
+                        <input type="text" id="ip" name="ip" value="{{ filters.ip or '' }}" placeholder="Filter by IP">
+                    </div>
+                    <div class="filter-group">
+                        <label for="start_date">Start Date:</label>
+                        <input type="date" id="start_date" name="start_date" value="{{ filters.start_date or '' }}">
+                    </div>
+                    <div class="filter-group">
+                        <label for="end_date">End Date:</label>
+                        <input type="date" id="end_date" name="end_date" value="{{ filters.end_date or '' }}">
+                    </div>
+                </div>
+                <div class="filter-row">
+                    <div class="filter-group">
+                        <label for="limit">Limit:</label>
+                        <select id="limit" name="limit">
+                            <option value="50" {% if request.args.get('limit') == '50' %}selected{% endif %}>50</option>
+                            <option value="100" {% if not request.args.get('limit') or request.args.get('limit') == '100' %}selected{% endif %}>100</option>
+                            <option value="200" {% if request.args.get('limit') == '200' %}selected{% endif %}>200</option>
+                            <option value="500" {% if request.args.get('limit') == '500' %}selected{% endif %}>500</option>
+                        </select>
+                    </div>
+                    <div class="filter-group" style="display: flex; align-items: flex-end;">
+                        <button type="submit">Apply Filters</button>
+                    </div>
+                </div>
+            </form>
+        </div>
+        
+        <div class="summary">
+            Showing {{ logs|length }} of {{ total }} logs
+        </div>
+        
+        <div class="export-links">
+            <a href="{{ request.path }}?{{ request.query_string.decode('utf-8') }}&format=json" target="_blank">Export as JSON</a>
+        </div>
+        
+        <table>
+            <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Method</th>
+                    <th>Path</th>
+                    <th>Status</th>
+                    <th>Response Time</th>
+                    <th>IP Address</th>
+                    <th>User Agent</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in logs %}
+                <tr>
+                    <td>{{ log.timestamp }}</td>
+                    <td>{{ log.method }}</td>
+                    <td>{{ log.path }}</td>
+                    <td class="status-{% if log.status_code %}{{ (log.status_code // 100)|string }}xx{% else %}unknown{% endif %}">
+                        {{ log.status_code or 'N/A' }}
+                    </td>
+                    <td>{{ '%.3f'|format(log.response_time) if log.response_time else 'N/A' }} s</td>
+                    <td>{{ log.ip }}</td>
+                    <td title="{{ log.user_agent }}">{{ log.user_agent|truncate(50) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        
+        {% if logs|length == 0 %}
+        <div style="text-align: center; margin-top: 30px; color: #666;">
+            <p>No logs found matching your criteria.</p>
+        </div>
+        {% endif %}
+    </div>
+</body>
+</html>
