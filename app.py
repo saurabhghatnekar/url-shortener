@@ -78,6 +78,67 @@ def should_log_route(path):
             return True
     return False
 
+# List of routes that require API key authentication
+API_KEY_REQUIRED_ROUTES = {
+    '/shorten',
+    '/shorten/batch',
+    '/delete',
+    '/edit',
+    '/user/urls',
+    '/user/tier/update'
+}
+
+# List of methods that require authentication for the above routes
+AUTH_REQUIRED_METHODS = {'POST', 'PUT', 'DELETE', 'PATCH'}
+
+# Routes that are exempt from API key validation even if they match the prefixes above
+AUTH_EXEMPT_ROUTES = {
+    '/shorten/docs',  # Documentation routes
+    '/api/health'     # Health check routes
+}
+
+# Function to check if the current route requires API key validation
+def requires_api_key(path, method):
+    # Skip API key validation for exempt routes
+    for exempt_route in AUTH_EXEMPT_ROUTES:
+        if path.startswith(exempt_route):
+            return False
+    
+    # Check if the path requires authentication
+    for protected_route in API_KEY_REQUIRED_ROUTES:
+        if path.startswith(protected_route):
+            # For these routes, only certain methods require authentication
+            if method in AUTH_REQUIRED_METHODS:
+                return True
+    
+    return False
+
+# API key validation middleware
+@app.before_request
+def validate_api_key():
+    # Skip for OPTIONS requests (pre-flight CORS requests)
+    if request.method == 'OPTIONS':
+        return None
+    
+    # Extract path from URL
+    parsed_url = urlparse(request.url)
+    path = parsed_url.path
+    
+    # Check if this route requires API key validation
+    if requires_api_key(path, request.method):
+        # Get API key from request headers
+        api_key = request.headers.get('X-API-Key')
+        
+        # Get user from API key
+        user = get_user_from_api_key(api_key)
+        
+        # If no valid user found, return error response
+        if not user:
+            return jsonify({'error': 'Invalid or missing API key'}), 401
+        
+        # Store user in Flask's g object for the route handler to use
+        g.user = user
+
 # Request logging middleware
 @app.before_request
 def log_request_info():
@@ -424,12 +485,15 @@ def get_user_from_api_key(api_key):
     if not api_key:
         return None
     
-    # Since we can't directly query by the decrypted key, we need to fetch all non-deleted keys
+    # Since we can't directly query by the decrypted key, we need to fetch all active keys
     # and check each one
-    api_keys = APIKey.query.filter_by(is_deleted=False).all()
+    api_keys = APIKey.query.filter_by(is_active=True).all()
     for key_record in api_keys:
         try:
             if key_record.key == api_key:
+                # Update last_used_at timestamp
+                key_record.last_used_at = datetime.utcnow()
+                db.session.commit()
                 return key_record.user
         except Exception as e:
             # If decryption fails for any reason, skip this key
@@ -451,12 +515,8 @@ def analytics_page():
 @app.route('/shorten', methods=['POST'])
 def shorten_url():
     """Shorten a given URL and return the short code."""
-    # Get API key from request headers
-    api_key = request.headers.get('X-API-Key')
-    user = get_user_from_api_key(api_key)
-    
-    if not user:
-        return jsonify({'error': 'Invalid or missing API key'}), 401
+    # User is already validated and available in g.user thanks to the middleware
+    user = g.user
     
     # Use the refactored validation and creation function
     new_url, error = validate_and_create_url(request.json, user.id)
@@ -488,12 +548,8 @@ def shorten_url():
 @app.route('/shorten/batch', methods=['POST'])
 def shorten_urls_batch():
     """Shorten multiple URLs in a single request."""
-    # Get API key from request headers
-    api_key = request.headers.get('X-API-Key')
-    user = get_user_from_api_key(api_key)
-    
-    if not user:
-        return jsonify({'error': 'Invalid or missing API key'}), 401
+    # User is already validated and available in g.user thanks to the middleware
+    user = g.user
     
     # Check if the user has the enterprise tier
     if user.pricing_tier != 'enterprise':
@@ -631,15 +687,11 @@ def redirect_to_url():
     db.session.commit()
     return redirect(url.original_url)
 
-@app.route('/delete', methods=['DELETE'])
+@app.route('/delete', methods=['POST'])
 def delete_short_code():
     """Delete a short code from the database."""
-    # Get API key from request headers
-    api_key = request.headers.get('X-API-Key')
-    user = get_user_from_api_key(api_key)
-    
-    if not user:
-        return jsonify({'error': 'Invalid or missing API key'}), 401
+    # User is already validated and available in g.user thanks to the middleware
+    user = g.user
         
     short_code = request.args.get('code')
     if not short_code:
@@ -916,18 +968,15 @@ def get_most_shortened_urls():
 def close_connection(exception):
     pass
 
-@app.route('/users/<int:user_id>/update-tier', methods=['PUT'])
-def update_user_tier(user_id):
+@app.route('/user/tier/update', methods=['POST'])
+def update_user_tier():
     """Update a user's pricing tier."""
-    # Get the API key from the request headers
-    api_key = request.headers.get('X-API-Key')
-    if not api_key:
-        return jsonify({'error': 'API key is required'}), 401
+    # User is already validated and available in g.user thanks to the middleware
+    admin_user = g.user
     
-    # Get the user from the API key
-    admin_user = get_user_from_api_key(api_key)
-    if not admin_user:
-        return jsonify({'error': 'Invalid API key'}), 401
+    # Additional check for enterprise tier
+    if admin_user.pricing_tier != 'enterprise':
+        return jsonify({'error': 'Unauthorized. This endpoint requires an enterprise API key.'}), 403
     
     # Get the request data
     data = request.get_json()
@@ -943,6 +992,10 @@ def update_user_tier(user_id):
         return jsonify({'error': 'Invalid pricing tier. Must be either "hobby" or "enterprise".'}), 400
     
     # Get the user to update
+    user_id = data.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'User ID is required'}), 400
+    
     user = User.query.get(user_id)
     if not user:
         return jsonify({'error': 'User not found'}), 404
@@ -969,12 +1022,8 @@ def get_user_urls():
     Returns:
         Response: JSON response with the list of URLs
     """
-    # Get API key from request headers
-    api_key = request.headers.get('X-API-Key')
-    user = get_user_from_api_key(api_key)
-    
-    if not user:
-        return jsonify({'error': 'Invalid or missing API key'}), 401
+    # User is already validated and available in g.user thanks to the middleware
+    user = g.user
     
     # Get pagination parameters
     page = request.args.get('page', 1, type=int)
