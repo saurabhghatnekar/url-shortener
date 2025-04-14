@@ -95,7 +95,7 @@ def test_shorten_url(api_key, with_password=False):
     
     # Add password if requested (testing password protection feature)
     if with_password:
-        url_data["password"] = "test_password"
+        url_data["password"] = f"secure_{int(time.time())}"  # Dynamic password
     
     # Make the request
     start = time.time()
@@ -122,7 +122,7 @@ def test_batch_shorten(api_key):
         "urls": [
             {"url": "https://example.com/batch1"},
             {"url": "https://example.com/batch2", "custom_code": f"btc{int(time.time()) % 10000}"},
-            {"url": "https://example.com/batch3", "password": "test123"}  # Testing password protection in batch
+            {"url": "https://example.com/batch3", "password": f"secure_{int(time.time())}_{hash(datetime.utcnow())}"} # Dynamic password
         ]
     }
     
@@ -188,7 +188,7 @@ def run_all_tests():
         # First without password (should fail)
         test_redirect(password_short_code)
         # Then with password (should succeed)
-        test_redirect(password_short_code, "test_password")
+        test_redirect(password_short_code, f"secure_{int(time.time())}")
     
     # Test with enterprise user
     print("\n--- Testing with Enterprise User ---")

@@ -245,26 +245,46 @@ def load_blacklist(force_reload=False):
                 'code': 'BLACKLISTED_IP'
             }), 403
 
-# Response time middleware
+# 1. Response time start middleware - Always first to measure complete request time
 @app.before_request
 def start_timer():
     """Store the start time of the request."""
     g.start_time = datetime.utcnow()
 
-@app.after_request
-def add_response_time(response):
-    """Calculate response time and add it to response headers."""
-    # Check if we have a start time
-    if hasattr(g, 'start_time'):
-        # Calculate response time in milliseconds
-        response_time = (datetime.utcnow() - g.start_time).total_seconds() * 1000
-        # Add response time to headers (rounded to 2 decimal places)
-        response.headers['X-Response-Time'] = f"{response_time:.2f}ms"
-        # Log response time for monitoring
-        app.logger.debug(f"Response time: {response_time:.2f}ms for {request.method} {request.path}")
-    return response
+# 2. Blacklist check middleware - Early rejection of malicious requests
+@app.before_request
+def check_blacklist_middleware():
+    """Check if the request's API key or IP is blacklisted."""
+    # Skip for OPTIONS requests (pre-flight CORS requests)
+    if request.method == 'OPTIONS':
+        return None
+    
+    # Load the blacklist
+    blacklist = load_blacklist()
+    
+    # Check if API key is blacklisted
+    api_key = request.headers.get('X-API-Key')
+    if api_key and api_key in blacklist['api_keys']:
+        app.logger.warning(f"Blocked request with blacklisted API key: {api_key[:5]}...")
+        return jsonify({
+            'error': 'Your API key has been blacklisted. Please contact support for assistance.',
+            'code': 'BLACKLISTED_API_KEY'
+        }), 403
+    
+    # Check if IP is blacklisted
+    if request.headers.getlist("X-Forwarded-For"):
+        ip = request.headers.getlist("X-Forwarded-For")[0]
+    else:
+        ip = request.remote_addr
+    
+    if ip in blacklist['ips']:
+        app.logger.warning(f"Blocked request from blacklisted IP: {ip}")
+        return jsonify({
+            'error': 'Your IP address has been blacklisted. Please contact support for assistance.',
+            'code': 'BLACKLISTED_IP'
+        }), 403
 
-# API key validation middleware
+# 3. API key validation middleware - Authentication after blacklist check
 @app.before_request
 def validate_api_key():
     # Skip for OPTIONS requests (pre-flight CORS requests)
@@ -289,12 +309,23 @@ def validate_api_key():
         
         # Store user in Flask's g object for the route handler to use
         g.user = user
+        
+        # Also store user in request object for other middlewares to access
+        # This avoids redundant database calls
+        request.user = user
 
-# Enterprise tier authorization middleware
+# 4. Enterprise tier authorization middleware - After authentication
 @app.before_request
 def validate_enterprise_tier():
-    # Skip if no user is authenticated yet
-    if not hasattr(g, 'user'):
+    # Check if user is available in request object (set by validate_api_key)
+    # This avoids redundant database calls
+    if hasattr(request, 'user'):
+        user = request.user
+    # Fall back to g.user if request.user is not available
+    elif hasattr(g, 'user'):
+        user = g.user
+    else:
+        # Skip if no user is authenticated yet
         return None
     
     # Extract path from URL
@@ -303,8 +334,6 @@ def validate_enterprise_tier():
     
     # Check if this route requires enterprise tier
     if requires_enterprise_tier(path):
-        user = g.user
-        
         # Check if the user has the enterprise tier
         if user.pricing_tier != 'enterprise':
             return jsonify({
@@ -313,89 +342,106 @@ def validate_enterprise_tier():
                 'required_tier': 'enterprise'
             }), 403
 
-# Request logging middleware
+# 5. Request logging middleware - After all security checks
 @app.before_request
 def log_request_info():
-    # Get the start time for the request
-    g.start_time = datetime.utcnow()
-    
     # Extract path from URL
     parsed_url = urlparse(request.url)
     path = parsed_url.path
     
-    # Only log specific routes
+    # Check if this route should be logged
     if should_log_route(path):
         # Get client IP address
         if request.headers.getlist("X-Forwarded-For"):
-            # If behind a proxy, get the real IP
             ip = request.headers.getlist("X-Forwarded-For")[0]
         else:
             ip = request.remote_addr
         
-        # Log the request details to file
-        request_logger.info(
-            f"IP: {ip} | "
-            f"Method: {request.method} | "
-            f"URL: {request.url} | "
-            f"Path: {path} | "
-            f"User-Agent: {request.headers.get('User-Agent', 'Unknown')}"
-        )
+        # Log to file
+        request_logger.info(f"Request: {request.method} {path} | IP: {ip} | User-Agent: {request.headers.get('User-Agent')}")
         
-        # Mark this request for logging in the database
+        # Set flag to log the response
         g.should_log = True
+        
+        # If database logging is enabled, log to database
+        if app.config.get('LOG_TO_DATABASE', False):
+            log_request_to_db()
     else:
         # Don't log this request
         g.should_log = False
 
-# Enable CORS for SSE
+# 6. Response time end middleware - Always last to include all processing time
 @app.after_request
-def after_request(response):
-    # Add CORS headers
+def add_response_time(response):
+    """Calculate response time and add it to response headers."""
+    # Check if we have a start time
+    if hasattr(g, 'start_time'):
+        # Calculate response time in milliseconds
+        response_time = (datetime.utcnow() - g.start_time).total_seconds() * 1000
+        # Add response time to headers (rounded to 2 decimal places)
+        response.headers['X-Response-Time'] = f"{response_time:.2f}ms"
+        # Log response time for monitoring
+        app.logger.debug(f"Response time: {response_time:.2f}ms for {request.method} {request.path}")
+    return response
+
+# 7. CORS headers middleware - After response time calculation
+@app.after_request
+def add_cors_headers(response):
+    """Add CORS headers to the response."""
+    # Always add CORS headers
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
-    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     
-    # Only log if we have a start time and this request should be logged
-    if hasattr(g, 'start_time') and hasattr(g, 'should_log') and g.should_log:
-        # Calculate response time
-        response_time = datetime.utcnow() - g.start_time
-        response_time_seconds = response_time.total_seconds()
-        
-        # Log to file
-        request_logger.info(f"Response time: {response_time_seconds:.3f}s | Status: {response.status_code}")
-        
-        # Get client IP address
-        if request.headers.getlist("X-Forwarded-For"):
-            ip = request.headers.getlist("X-Forwarded-For")[0]
-        else:
-            ip = request.remote_addr
-        
-        # Extract path from URL
-        parsed_url = urlparse(request.url)
-        path = parsed_url.path
-        
-        try:
-            # Create database log entry
-            log_entry = RequestLog(
-                timestamp=g.start_time,
-                method=request.method,
-                url=request.url,
-                path=path,
-                user_agent=request.headers.get('User-Agent'),
-                ip_address=ip,
-                status_code=response.status_code,
-                response_time=response_time_seconds
-            )
-            
-            # Add to session and commit
-            db.session.add(log_entry)
-            db.session.commit()
-        except Exception as e:
-            # If there's an error saving to the database, log it but don't break the request
-            logger.error(f"Error saving request log to database: {str(e)}")
-            db.session.rollback()
+    # Handle SSE connections
+    if response.mimetype == 'text/event-stream':
+        response.headers.add('Cache-Control', 'no-cache')
+        response.headers.add('X-Accel-Buffering', 'no')  # For NGINX
+        response.headers.add('Connection', 'keep-alive')
     
     return response
+
+# Function to log request details to the database
+def log_request_to_db():
+    """Log request details to the database."""
+    # This function is called from log_request_info middleware
+    # Get client IP address
+    if request.headers.getlist("X-Forwarded-For"):
+        ip = request.headers.getlist("X-Forwarded-For")[0]
+    else:
+        ip = request.remote_addr
+        
+    # Extract path from URL
+    parsed_url = urlparse(request.url)
+    path = parsed_url.path
+    
+    # Calculate response time
+    if hasattr(g, 'start_time'):
+        response_time = datetime.utcnow() - g.start_time
+        response_time_seconds = response_time.total_seconds()
+    else:
+        response_time_seconds = 0
+    
+    try:
+        # Create database log entry
+        log_entry = RequestLog(
+            timestamp=g.start_time,
+            method=request.method,
+            url=request.url,
+            path=path,
+            user_agent=request.headers.get('User-Agent'),
+            ip_address=ip,
+            status_code=200,  # Will be updated after response
+            response_time=response_time_seconds
+        )
+        
+        # Add to session and commit
+        db.session.add(log_entry)
+        db.session.commit()
+    except Exception as e:
+        # If there's an error saving to the database, log it but don't break the request
+        logger.error(f"Error saving request log to database: {str(e)}")
+        db.session.rollback()
 
 # Queue for SSE events
 url_events = Queue()
