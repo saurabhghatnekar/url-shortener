@@ -17,12 +17,86 @@ from cryptography.fernet import Fernet
 import base64
 from functools import wraps
 import statistics
+import traceback
+import socket
+
+# Import Datadog for observability (with fallback if not installed)
+try:
+    import ddtrace
+    from ddtrace import tracer, config
+    DATADOG_AVAILABLE = True
+except ImportError:
+    DATADOG_AVAILABLE = False
+    # Create dummy objects to avoid errors
+    class DummyTracer:
+        def trace(self, *args, **kwargs):
+            class DummySpan:
+                def __enter__(self):
+                    return self
+                def __exit__(self, exc_type, exc_val, exc_tb):
+                    pass
+                def set_tag(self, *args, **kwargs):
+                    pass
+            return DummySpan()
+        def set_tags(self, *args, **kwargs):
+            pass
+    
+    class DummyConfig:
+        def __init__(self):
+            self.flask = {}
+    
+    class DummyMetrics:
+        def distribution(self, *args, **kwargs):
+            pass
+        def increment(self, *args, **kwargs):
+            pass
+    
+    class DummyRuntime:
+        def __init__(self):
+            self.metrics = DummyMetrics()
+    
+    class DummyDDTrace:
+        def __init__(self):
+            self.runtime = DummyRuntime()
+    
+    ddtrace = DummyDDTrace()
+    tracer = DummyTracer()
+    config = DummyConfig()
 
 import os
 
 # Initialize Flask app
 app = Flask(__name__)
 app.template_folder = os.path.abspath(os.path.join(os.path.dirname(__file__), 'templates'))
+
+# Configure Datadog
+ENABLE_DATADOG = os.environ.get('ENABLE_DATADOG', 'False') == 'True' and DATADOG_AVAILABLE
+DATADOG_ENV = os.environ.get('DATADOG_ENV', 'development')
+DATADOG_SERVICE = os.environ.get('DATADOG_SERVICE', 'url-shortener')
+
+# Initialize Datadog if enabled and available
+if ENABLE_DATADOG:
+    try:
+        # Configure Datadog tracer
+        config.flask['service_name'] = DATADOG_SERVICE
+        config.flask['distributed_tracing'] = True
+        config.flask['analytics_enabled'] = True
+        
+        # Set global tags
+        tracer.set_tags({
+            'env': DATADOG_ENV,
+            'service': DATADOG_SERVICE,
+            'host': socket.gethostname()
+        })
+        
+        # Initialize Datadog Flask middleware
+        from ddtrace.contrib.flask import TraceMiddleware
+        TraceMiddleware(app, tracer, service=DATADOG_SERVICE)
+        
+        app.logger.info(f"Datadog observability enabled for service: {DATADOG_SERVICE} in environment: {DATADOG_ENV}")
+    except Exception as e:
+        app.logger.warning(f"Failed to initialize Datadog: {str(e)}")
+        ENABLE_DATADOG = False
 
 # Check if we should force SQLite usage
 if os.environ.get('USE_SQLITE') == 'True':
@@ -259,11 +333,22 @@ def time_middleware(middleware_name):
             # Record start time
             start = datetime.utcnow()
             
-            # Execute the middleware function
-            result = func(*args, **kwargs)
-            
-            # Calculate execution time
-            execution_time = (datetime.utcnow() - start).total_seconds() * 1000  # in milliseconds
+            # Create a span for Datadog if enabled
+            if ENABLE_DATADOG:
+                with tracer.trace(f'middleware.{middleware_name}', service=DATADOG_SERVICE) as span:
+                    # Add middleware name as a tag
+                    span.set_tag('middleware.name', middleware_name)
+                    
+                    # Execute the middleware function
+                    result = func(*args, **kwargs)
+                    
+                    # Calculate execution time
+                    execution_time = (datetime.utcnow() - start).total_seconds() * 1000  # in milliseconds
+                    span.set_tag('middleware.execution_time_ms', execution_time)
+            else:
+                # Execute the middleware function without Datadog tracing
+                result = func(*args, **kwargs)
+                execution_time = (datetime.utcnow() - start).total_seconds() * 1000  # in milliseconds
             
             # Store timing in request context
             if not hasattr(g, 'middleware_times'):
@@ -438,6 +523,28 @@ def add_response_time(response):
                 
             # Log middleware timing breakdown
             app.logger.debug(f"Middleware timing breakdown: {g.middleware_times}")
+        
+        # Send metrics to Datadog if enabled
+        if ENABLE_DATADOG:
+            # Record response time as a distribution metric
+            ddtrace.runtime.metrics.distribution(
+                'url_shortener.response_time',
+                response_time,
+                tags=[
+                    f'path:{request.path}',
+                    f'method:{request.method}',
+                    f'status_code:{response.status_code}'
+                ]
+            )
+            
+            # Record middleware times as distribution metrics
+            if hasattr(g, 'middleware_times'):
+                for middleware, time_ms in g.middleware_times.items():
+                    ddtrace.runtime.metrics.distribution(
+                        'url_shortener.middleware_time',
+                        time_ms,
+                        tags=[f'middleware:{middleware}']
+                    )
     return response
 
 # 7. CORS headers middleware - After response time calculation
@@ -1652,6 +1759,47 @@ def middleware_stats():
         'total_requests': len(middleware_timing.get('start_timer', [])),
         'timestamp': datetime.utcnow().isoformat()
     })
+
+# 8. Observability middleware - Track errors and exceptions
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Global exception handler for observability."""
+    # Get exception details
+    error_class = e.__class__.__name__
+    error_message = str(e)
+    stack_trace = traceback.format_exc()
+    
+    # Log the error
+    app.logger.error(f"Unhandled {error_class}: {error_message}\n{stack_trace}")
+    
+    # Send error to Datadog if enabled
+    if ENABLE_DATADOG:
+        # Create a span for the error
+        with tracer.trace('error', service=DATADOG_SERVICE) as span:
+            span.set_tag('error.type', error_class)
+            span.set_tag('error.message', error_message)
+            span.set_tag('error.stack', stack_trace)
+            span.error = 1
+            
+            # Increment error count metric
+            ddtrace.runtime.metrics.increment(
+                'url_shortener.errors',
+                tags=[
+                    f'error_type:{error_class}',
+                    f'path:{request.path}',
+                    f'method:{request.method}'
+                ]
+            )
+    
+    # Return a JSON response for API routes or HTML for web routes
+    if request.path.startswith('/api/') or request.headers.get('Accept') == 'application/json':
+        return jsonify({
+            'error': error_class,
+            'message': error_message,
+            'status_code': 500
+        }), 500
+    else:
+        return render_template('error.html', error=error_class, message=error_message), 500
 
 if __name__ == '__main__':
     with app.app_context():
