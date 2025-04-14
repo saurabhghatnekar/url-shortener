@@ -15,6 +15,8 @@ from logging.handlers import RotatingFileHandler
 import os.path
 from cryptography.fernet import Fernet
 import base64
+from functools import wraps
+import statistics
 
 import os
 
@@ -245,14 +247,51 @@ def load_blacklist(force_reload=False):
                 'code': 'BLACKLISTED_IP'
             }), 403
 
+# Middleware timing dictionary to store timing information for each middleware
+middleware_timing = {}
+
+# Decorator for timing middleware functions
+def time_middleware(middleware_name):
+    """Decorator to time middleware execution."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Record start time
+            start = datetime.utcnow()
+            
+            # Execute the middleware function
+            result = func(*args, **kwargs)
+            
+            # Calculate execution time
+            execution_time = (datetime.utcnow() - start).total_seconds() * 1000  # in milliseconds
+            
+            # Store timing in request context
+            if not hasattr(g, 'middleware_times'):
+                g.middleware_times = {}
+            g.middleware_times[middleware_name] = execution_time
+            
+            # Store in global timing dictionary for analytics
+            if middleware_name not in middleware_timing:
+                middleware_timing[middleware_name] = []
+            middleware_timing[middleware_name].append(execution_time)
+            
+            # Log the timing
+            app.logger.debug(f"Middleware '{middleware_name}' took {execution_time:.2f}ms")
+            
+            return result
+        return wrapper
+    return decorator
+
 # 1. Response time start middleware - Always first to measure complete request time
 @app.before_request
+@time_middleware('start_timer')
 def start_timer():
     """Store the start time of the request."""
     g.start_time = datetime.utcnow()
 
 # 2. Blacklist check middleware - Early rejection of malicious requests
 @app.before_request
+@time_middleware('blacklist_check')
 def check_blacklist_middleware():
     """Check if the request's API key or IP is blacklisted."""
     # Skip for OPTIONS requests (pre-flight CORS requests)
@@ -286,6 +325,7 @@ def check_blacklist_middleware():
 
 # 3. API key validation middleware - Authentication after blacklist check
 @app.before_request
+@time_middleware('api_key_validation')
 def validate_api_key():
     # Skip for OPTIONS requests (pre-flight CORS requests)
     if request.method == 'OPTIONS':
@@ -316,6 +356,7 @@ def validate_api_key():
 
 # 4. Enterprise tier authorization middleware - After authentication
 @app.before_request
+@time_middleware('enterprise_tier_validation')
 def validate_enterprise_tier():
     # Check if user is available in request object (set by validate_api_key)
     # This avoids redundant database calls
@@ -344,6 +385,7 @@ def validate_enterprise_tier():
 
 # 5. Request logging middleware - After all security checks
 @app.before_request
+@time_middleware('request_logging')
 def log_request_info():
     # Extract path from URL
     parsed_url = urlparse(request.url)
@@ -372,6 +414,7 @@ def log_request_info():
 
 # 6. Response time end middleware - Always last to include all processing time
 @app.after_request
+@time_middleware('response_time_calculation')
 def add_response_time(response):
     """Calculate response time and add it to response headers."""
     # Check if we have a start time
@@ -382,10 +425,24 @@ def add_response_time(response):
         response.headers['X-Response-Time'] = f"{response_time:.2f}ms"
         # Log response time for monitoring
         app.logger.debug(f"Response time: {response_time:.2f}ms for {request.method} {request.path}")
+        
+        # Add middleware timing information to response headers if in debug mode
+        if app.debug and hasattr(g, 'middleware_times'):
+            # Add total middleware time
+            total_middleware_time = sum(g.middleware_times.values())
+            response.headers['X-Middleware-Time'] = f"{total_middleware_time:.2f}ms"
+            
+            # Add individual middleware times
+            for middleware, time_ms in g.middleware_times.items():
+                response.headers[f'X-Middleware-{middleware}'] = f"{time_ms:.2f}ms"
+                
+            # Log middleware timing breakdown
+            app.logger.debug(f"Middleware timing breakdown: {g.middleware_times}")
     return response
 
 # 7. CORS headers middleware - After response time calculation
 @app.after_request
+@time_middleware('cors_headers')
 def add_cors_headers(response):
     """Add CORS headers to the response."""
     # Always add CORS headers
@@ -1569,6 +1626,32 @@ def manage_blacklist():
         except Exception as e:
             app.logger.error(f"Error loading blacklist: {str(e)}")
             return jsonify({'error': f'Error loading blacklist: {str(e)}'}), 500
+
+# Endpoint to view middleware timing statistics
+@app.route('/admin/middleware-stats', methods=['GET'])
+def middleware_stats():
+    """View middleware timing statistics."""
+    # Check if the user is an admin
+    if not hasattr(g, 'user') or g.user.role != 'admin':
+        return jsonify({'error': 'Access denied. Admin privileges required.'}), 403
+    
+    stats = {}
+    for middleware, times in middleware_timing.items():
+        if times:
+            stats[middleware] = {
+                'count': len(times),
+                'avg_ms': statistics.mean(times),
+                'min_ms': min(times),
+                'max_ms': max(times),
+                'median_ms': statistics.median(times),
+                'total_ms': sum(times)
+            }
+    
+    return jsonify({
+        'middleware_stats': stats,
+        'total_requests': len(middleware_timing.get('start_timer', [])),
+        'timestamp': datetime.utcnow().isoformat()
+    })
 
 if __name__ == '__main__':
     with app.app_context():
