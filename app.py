@@ -1,4 +1,4 @@
-from flask import Flask, request, redirect, jsonify, Response, render_template, copy_current_request_context
+from flask import Flask, request, redirect, jsonify, Response, render_template, copy_current_request_context, g
 import string
 import random
 import re
@@ -11,40 +11,601 @@ import json
 from threading import Event, Thread
 from time import sleep
 import logging
+from logging.handlers import RotatingFileHandler
+import os.path
 from cryptography.fernet import Fernet
 import base64
+from functools import wraps
+import statistics
+import traceback
+import socket
+
+# Import Datadog for observability (with fallback if not installed)
+try:
+    import ddtrace
+    from ddtrace import tracer, config
+    DATADOG_AVAILABLE = True
+except ImportError:
+    DATADOG_AVAILABLE = False
+    # Create dummy objects to avoid errors
+    class DummyTracer:
+        def trace(self, *args, **kwargs):
+            class DummySpan:
+                def __enter__(self):
+                    return self
+                def __exit__(self, exc_type, exc_val, exc_tb):
+                    pass
+                def set_tag(self, *args, **kwargs):
+                    pass
+            return DummySpan()
+        def set_tags(self, *args, **kwargs):
+            pass
+    
+    class DummyConfig:
+        def __init__(self):
+            self.flask = {}
+    
+    class DummyMetrics:
+        def distribution(self, *args, **kwargs):
+            pass
+        def increment(self, *args, **kwargs):
+            pass
+    
+    class DummyRuntime:
+        def __init__(self):
+            self.metrics = DummyMetrics()
+    
+    class DummyDDTrace:
+        def __init__(self):
+            self.runtime = DummyRuntime()
+    
+    ddtrace = DummyDDTrace()
+    tracer = DummyTracer()
+    config = DummyConfig()
 
 import os
 
+# Initialize Flask app
 app = Flask(__name__)
 app.template_folder = os.path.abspath(os.path.join(os.path.dirname(__file__), 'templates'))
 
-# Check if we're in a testing environment
-if os.environ.get('TESTING') == 'True':
-    # Use SQLite in-memory database for testing
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
+# Configure Datadog
+ENABLE_DATADOG = os.environ.get('ENABLE_DATADOG', 'False') == 'True' and DATADOG_AVAILABLE
+DATADOG_ENV = os.environ.get('DATADOG_ENV', 'development')
+DATADOG_SERVICE = os.environ.get('DATADOG_SERVICE', 'url-shortener')
+
+# Initialize Datadog if enabled and available
+if ENABLE_DATADOG:
+    try:
+        # Configure Datadog tracer
+        config.flask['service_name'] = DATADOG_SERVICE
+        config.flask['distributed_tracing'] = True
+        config.flask['analytics_enabled'] = True
+        
+        # Set global tags
+        tracer.set_tags({
+            'env': DATADOG_ENV,
+            'service': DATADOG_SERVICE,
+            'host': socket.gethostname()
+        })
+        
+        # Initialize Datadog Flask middleware
+        from ddtrace.contrib.flask import TraceMiddleware
+        TraceMiddleware(app, tracer, service=DATADOG_SERVICE)
+        
+        app.logger.info(f"Datadog observability enabled for service: {DATADOG_SERVICE} in environment: {DATADOG_ENV}")
+    except Exception as e:
+        app.logger.warning(f"Failed to initialize Datadog: {str(e)}")
+        ENABLE_DATADOG = False
+
+# Check if we should force SQLite usage
+if os.environ.get('USE_SQLITE') == 'True':
+    # Force SQLite for local development
+    sqlite_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'url_shortener.db')
+    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{sqlite_path}'
+    print(f"Using SQLite database at: {sqlite_path}")
+# Otherwise use the DATABASE_URL if provided
+elif os.environ.get('DATABASE_URL'):
+    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
+    print(f"Using database from DATABASE_URL")
+# Default to SQLite
 else:
-    # Use environment variable for database URI if available, otherwise use the PostgreSQL URI
-    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
-        'DATABASE_URL',
-        'postgresql://neondb_owner:npg_8LqUgf2eYSid@ep-billowing-sunset-a5goac87-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require'
-    )
+    # Use SQLite for local development
+    sqlite_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'url_shortener.db')
+    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{sqlite_path}'
+    print(f"Using default SQLite database at: {sqlite_path}")
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['TESTING'] = os.environ.get('TESTING', 'False') == 'True'
+
+# Configure main application logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Configure request logger
+request_logger = logging.getLogger('request_logger')
+request_logger.setLevel(logging.INFO)
+
+# Create logs directory if it doesn't exist
+logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(logs_dir, exist_ok=True)
+
+# Set up file handler for request logs
+request_log_file = os.path.join(logs_dir, 'request_logs.log')
+request_file_handler = RotatingFileHandler(request_log_file, maxBytes=10485760, backupCount=10)  # 10MB per file, keep 10 files
+request_file_handler.setLevel(logging.INFO)
+
+# Create a formatter for the logs
+request_formatter = logging.Formatter('%(asctime)s - %(message)s')
+request_file_handler.setFormatter(request_formatter)
+
+# Add the handler to the logger
+request_logger.addHandler(request_file_handler)
 
 db = SQLAlchemy(app)
 
 # Initialize Flask-Migrate
 migrate = Migrate(app, db)
 
-# Enable CORS for SSE
+# List of routes to log
+LOGGED_ROUTES = [
+    '/shorten',       # Log the URL shortening endpoint
+    '/redirect',      # Log the URL redirection endpoint
+    '/edit',          # Log the URL editing endpoint
+    '/delete',        # Log the URL deletion endpoint
+    '/shorten/batch'  # Log the batch URL shortening endpoint
+]
+
+# Function to check if the current route should be logged
+def should_log_route(path):
+    # Check if the path starts with any of the routes in LOGGED_ROUTES
+    for route in LOGGED_ROUTES:
+        if path.startswith(route):
+            return True
+    return False
+
+# List of routes that require API key authentication
+API_KEY_REQUIRED_ROUTES = {
+    '/shorten',
+    '/shorten/batch',
+    '/delete',
+    '/edit',
+    '/user/urls',
+    '/user/tier/update'
+}
+
+# List of methods that require authentication for the above routes
+AUTH_REQUIRED_METHODS = {'POST', 'PUT', 'DELETE', 'PATCH'}
+
+# Routes that are exempt from API key validation even if they match the prefixes above
+AUTH_EXEMPT_ROUTES = {
+    '/shorten/docs',  # Documentation routes
+    '/api/health'     # Health check routes
+}
+
+# List of routes that require enterprise tier
+ENTERPRISE_TIER_ROUTES = {
+    '/shorten/batch',  # Batch URL shortening
+    '/analytics/advanced',  # Advanced analytics (future feature)
+    '/api/v2'  # Future API endpoints
+}
+
+# Function to check if the current route requires API key validation
+def requires_api_key(path, method):
+    # Skip API key validation for exempt routes
+    for exempt_route in AUTH_EXEMPT_ROUTES:
+        if path.startswith(exempt_route):
+            return False
+    
+    # Check if the path requires authentication
+    for protected_route in API_KEY_REQUIRED_ROUTES:
+        if path.startswith(protected_route):
+            # For these routes, only certain methods require authentication
+            if method in AUTH_REQUIRED_METHODS:
+                return True
+    
+    return False
+
+# Function to check if the current route requires enterprise tier
+def requires_enterprise_tier(path):
+    # Check if the path requires enterprise tier
+    for enterprise_route in ENTERPRISE_TIER_ROUTES:
+        if path.startswith(enterprise_route):
+            return True
+    return False
+
+# Path to the blacklist configuration file
+BLACKLIST_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'blacklist.json')
+
+# Cache for blacklisted API keys and IPs
+blacklist_cache = {
+    'api_keys': set(),
+    'ips': set(),
+    'last_loaded': None
+}
+
+# Allow tests to override the blacklist path
+def get_blacklist_path():
+    """Get the path to the blacklist configuration file.
+    
+    This function allows tests to override the blacklist path by setting
+    app.config['BLACKLIST_CONFIG_PATH'].
+    """
+    if app.config.get('BLACKLIST_CONFIG_PATH'):
+        return app.config.get('BLACKLIST_CONFIG_PATH')
+    return BLACKLIST_CONFIG_PATH
+
+# Function to load the blacklist from the configuration file
+def load_blacklist(force_reload=False):
+    """Load the blacklist from the configuration file.
+    
+    Args:
+        force_reload (bool): If True, reload the blacklist even if it was recently loaded.
+        
+    Returns:
+        dict: A dictionary containing blacklisted API keys and IPs.
+    """
+    global blacklist_cache
+    
+    # Check if we need to reload the blacklist
+    current_time = datetime.utcnow()
+    if not force_reload and blacklist_cache['last_loaded'] and \
+       (current_time - blacklist_cache['last_loaded']).total_seconds() < 60:
+        # Use cached blacklist if it was loaded less than 60 seconds ago
+        return blacklist_cache
+    
+    try:
+        # Get the blacklist path (allows for testing override)
+        blacklist_path = get_blacklist_path()
+        
+        # Create the config directory if it doesn't exist
+        os.makedirs(os.path.dirname(blacklist_path), exist_ok=True)
+        
+        # Create the blacklist file with default values if it doesn't exist
+        if not os.path.exists(blacklist_path):
+            default_blacklist = {
+                "blacklisted_api_keys": [],
+                "blacklisted_ips": [],
+                "last_updated": datetime.utcnow().isoformat(),
+                "notes": "This file contains blacklisted API keys and IPs. Add entries to block abusive users."
+            }
+            with open(blacklist_path, 'w') as f:
+                json.dump(default_blacklist, f, indent=2)
+        
+        # Load the blacklist from the file
+        with open(blacklist_path, 'r') as f:
+            blacklist_data = json.load(f)
+        
+        # Update the cache
+        blacklist_cache['api_keys'] = set(blacklist_data.get('blacklisted_api_keys', []))
+        blacklist_cache['ips'] = set(blacklist_data.get('blacklisted_ips', []))
+        blacklist_cache['last_loaded'] = current_time
+        
+        app.logger.info(f"Loaded blacklist with {len(blacklist_cache['api_keys'])} API keys and {len(blacklist_cache['ips'])} IPs")
+        return blacklist_cache
+    except Exception as e:
+        app.logger.error(f"Error loading blacklist: {str(e)}")
+        # Return the current cache if there's an error
+        return blacklist_cache
+
+    # Blacklist middleware
+    @app.before_request
+    def check_blacklist():
+        """Check if the request's API key or IP is blacklisted."""
+        # Skip for OPTIONS requests (pre-flight CORS requests)
+        if request.method == 'OPTIONS':
+            return None
+        
+        # Load the blacklist
+        blacklist = load_blacklist()
+        
+        # Check if the API key is blacklisted
+        api_key = request.headers.get('X-API-Key')
+        if api_key and api_key in blacklist['api_keys']:
+            app.logger.warning(f"Blocked request with blacklisted API key: {api_key[:5]}...")
+            return jsonify({
+                'error': 'Your API key has been blacklisted. Please contact support for assistance.',
+                'code': 'BLACKLISTED_API_KEY'
+            }), 403
+        
+        # Check if the IP is blacklisted
+        if request.headers.getlist("X-Forwarded-For"):
+            ip = request.headers.getlist("X-Forwarded-For")[0]
+        else:
+            ip = request.remote_addr
+        
+        if ip in blacklist['ips']:
+            app.logger.warning(f"Blocked request from blacklisted IP: {ip}")
+            return jsonify({
+                'error': 'Your IP address has been blacklisted. Please contact support for assistance.',
+                'code': 'BLACKLISTED_IP'
+            }), 403
+
+# Middleware timing dictionary to store timing information for each middleware
+middleware_timing = {}
+
+# Decorator for timing middleware functions
+def time_middleware(middleware_name):
+    """Decorator to time middleware execution."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Record start time
+            start = datetime.utcnow()
+            
+            # Create a span for Datadog if enabled
+            if ENABLE_DATADOG:
+                with tracer.trace(f'middleware.{middleware_name}', service=DATADOG_SERVICE) as span:
+                    # Add middleware name as a tag
+                    span.set_tag('middleware.name', middleware_name)
+                    
+                    # Execute the middleware function
+                    result = func(*args, **kwargs)
+                    
+                    # Calculate execution time
+                    execution_time = (datetime.utcnow() - start).total_seconds() * 1000  # in milliseconds
+                    span.set_tag('middleware.execution_time_ms', execution_time)
+            else:
+                # Execute the middleware function without Datadog tracing
+                result = func(*args, **kwargs)
+                execution_time = (datetime.utcnow() - start).total_seconds() * 1000  # in milliseconds
+            
+            # Store timing in request context
+            if not hasattr(g, 'middleware_times'):
+                g.middleware_times = {}
+            g.middleware_times[middleware_name] = execution_time
+            
+            # Store in global timing dictionary for analytics
+            if middleware_name not in middleware_timing:
+                middleware_timing[middleware_name] = []
+            middleware_timing[middleware_name].append(execution_time)
+            
+            # Log the timing
+            app.logger.debug(f"Middleware '{middleware_name}' took {execution_time:.2f}ms")
+            
+            return result
+        return wrapper
+    return decorator
+
+# 1. Response time start middleware - Always first to measure complete request time
+@app.before_request
+@time_middleware('start_timer')
+def start_timer():
+    """Store the start time of the request."""
+    g.start_time = datetime.utcnow()
+
+# 2. Blacklist check middleware - Early rejection of malicious requests
+@app.before_request
+@time_middleware('blacklist_check')
+def check_blacklist_middleware():
+    """Check if the request's API key or IP is blacklisted."""
+    # Skip for OPTIONS requests (pre-flight CORS requests)
+    if request.method == 'OPTIONS':
+        return None
+    
+    # Load the blacklist
+    blacklist = load_blacklist()
+    
+    # Check if API key is blacklisted
+    api_key = request.headers.get('X-API-Key')
+    if api_key and api_key in blacklist['api_keys']:
+        app.logger.warning(f"Blocked request with blacklisted API key: {api_key[:5]}...")
+        return jsonify({
+            'error': 'Your API key has been blacklisted. Please contact support for assistance.',
+            'code': 'BLACKLISTED_API_KEY'
+        }), 403
+    
+    # Check if IP is blacklisted
+    if request.headers.getlist("X-Forwarded-For"):
+        ip = request.headers.getlist("X-Forwarded-For")[0]
+    else:
+        ip = request.remote_addr
+    
+    if ip in blacklist['ips']:
+        app.logger.warning(f"Blocked request from blacklisted IP: {ip}")
+        return jsonify({
+            'error': 'Your IP address has been blacklisted. Please contact support for assistance.',
+            'code': 'BLACKLISTED_IP'
+        }), 403
+
+# 3. API key validation middleware - Authentication after blacklist check
+@app.before_request
+@time_middleware('api_key_validation')
+def validate_api_key():
+    # Skip for OPTIONS requests (pre-flight CORS requests)
+    if request.method == 'OPTIONS':
+        return None
+    
+    # Extract path from URL
+    parsed_url = urlparse(request.url)
+    path = parsed_url.path
+    
+    # Check if this route requires API key validation
+    if requires_api_key(path, request.method):
+        # Get API key from request headers
+        api_key = request.headers.get('X-API-Key')
+        
+        # Get user from API key
+        user = get_user_from_api_key(api_key)
+        
+        # If no valid user found, return error response
+        if not user:
+            return jsonify({'error': 'Invalid or missing API key'}), 401
+        
+        # Store user in Flask's g object for the route handler to use
+        g.user = user
+        
+        # Also store user in request object for other middlewares to access
+        # This avoids redundant database calls
+        request.user = user
+
+# 4. Enterprise tier authorization middleware - After authentication
+@app.before_request
+@time_middleware('enterprise_tier_validation')
+def validate_enterprise_tier():
+    # Check if user is available in request object (set by validate_api_key)
+    # This avoids redundant database calls
+    if hasattr(request, 'user'):
+        user = request.user
+    # Fall back to g.user if request.user is not available
+    elif hasattr(g, 'user'):
+        user = g.user
+    else:
+        # Skip if no user is authenticated yet
+        return None
+    
+    # Extract path from URL
+    parsed_url = urlparse(request.url)
+    path = parsed_url.path
+    
+    # Check if this route requires enterprise tier
+    if requires_enterprise_tier(path):
+        # Check if the user has the enterprise tier
+        if user.pricing_tier != 'enterprise':
+            return jsonify({
+                'error': 'Access denied. This feature is only available for enterprise tier users.',
+                'current_tier': user.pricing_tier,
+                'required_tier': 'enterprise'
+            }), 403
+
+# 5. Request logging middleware - After all security checks
+@app.before_request
+@time_middleware('request_logging')
+def log_request_info():
+    # Extract path from URL
+    parsed_url = urlparse(request.url)
+    path = parsed_url.path
+    
+    # Check if this route should be logged
+    if should_log_route(path):
+        # Get client IP address
+        if request.headers.getlist("X-Forwarded-For"):
+            ip = request.headers.getlist("X-Forwarded-For")[0]
+        else:
+            ip = request.remote_addr
+        
+        # Log to file
+        request_logger.info(f"Request: {request.method} {path} | IP: {ip} | User-Agent: {request.headers.get('User-Agent')}")
+        
+        # Set flag to log the response
+        g.should_log = True
+        
+        # If database logging is enabled, log to database
+        if app.config.get('LOG_TO_DATABASE', False):
+            log_request_to_db()
+    else:
+        # Don't log this request
+        g.should_log = False
+
+# 6. Response time end middleware - Always last to include all processing time
 @app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
-    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+@time_middleware('response_time_calculation')
+def add_response_time(response):
+    """Calculate response time and add it to response headers."""
+    # Check if we have a start time
+    if hasattr(g, 'start_time'):
+        # Calculate response time in milliseconds
+        response_time = (datetime.utcnow() - g.start_time).total_seconds() * 1000
+        # Add response time to headers (rounded to 2 decimal places)
+        response.headers['X-Response-Time'] = f"{response_time:.2f}ms"
+        # Log response time for monitoring
+        app.logger.debug(f"Response time: {response_time:.2f}ms for {request.method} {request.path}")
+        
+        # Add middleware timing information to response headers if in debug mode
+        if app.debug and hasattr(g, 'middleware_times'):
+            # Add total middleware time
+            total_middleware_time = sum(g.middleware_times.values())
+            response.headers['X-Middleware-Time'] = f"{total_middleware_time:.2f}ms"
+            
+            # Add individual middleware times
+            for middleware, time_ms in g.middleware_times.items():
+                response.headers[f'X-Middleware-{middleware}'] = f"{time_ms:.2f}ms"
+                
+            # Log middleware timing breakdown
+            app.logger.debug(f"Middleware timing breakdown: {g.middleware_times}")
+        
+        # Send metrics to Datadog if enabled
+        if ENABLE_DATADOG:
+            # Record response time as a distribution metric
+            ddtrace.runtime.metrics.distribution(
+                'url_shortener.response_time',
+                response_time,
+                tags=[
+                    f'path:{request.path}',
+                    f'method:{request.method}',
+                    f'status_code:{response.status_code}'
+                ]
+            )
+            
+            # Record middleware times as distribution metrics
+            if hasattr(g, 'middleware_times'):
+                for middleware, time_ms in g.middleware_times.items():
+                    ddtrace.runtime.metrics.distribution(
+                        'url_shortener.middleware_time',
+                        time_ms,
+                        tags=[f'middleware:{middleware}']
+                    )
     return response
+
+# 7. CORS headers middleware - After response time calculation
+@app.after_request
+@time_middleware('cors_headers')
+def add_cors_headers(response):
+    """Add CORS headers to the response."""
+    # Always add CORS headers
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    
+    # Handle SSE connections
+    if response.mimetype == 'text/event-stream':
+        response.headers.add('Cache-Control', 'no-cache')
+        response.headers.add('X-Accel-Buffering', 'no')  # For NGINX
+        response.headers.add('Connection', 'keep-alive')
+    
+    return response
+
+# Function to log request details to the database
+def log_request_to_db():
+    """Log request details to the database."""
+    # This function is called from log_request_info middleware
+    # Get client IP address
+    if request.headers.getlist("X-Forwarded-For"):
+        ip = request.headers.getlist("X-Forwarded-For")[0]
+    else:
+        ip = request.remote_addr
+        
+    # Extract path from URL
+    parsed_url = urlparse(request.url)
+    path = parsed_url.path
+    
+    # Calculate response time
+    if hasattr(g, 'start_time'):
+        response_time = datetime.utcnow() - g.start_time
+        response_time_seconds = response_time.total_seconds()
+    else:
+        response_time_seconds = 0
+    
+    try:
+        # Create database log entry
+        log_entry = RequestLog(
+            timestamp=g.start_time,
+            method=request.method,
+            url=request.url,
+            path=path,
+            user_agent=request.headers.get('User-Agent'),
+            ip_address=ip,
+            status_code=200,  # Will be updated after response
+            response_time=response_time_seconds
+        )
+        
+        # Add to session and commit
+        db.session.add(log_entry)
+        db.session.commit()
+    except Exception as e:
+        # If there's an error saving to the database, log it but don't break the request
+        logger.error(f"Error saving request log to database: {str(e)}")
+        db.session.rollback()
 
 # Queue for SSE events
 url_events = Queue()
@@ -75,6 +636,7 @@ class User(db.Model):
     name = db.Column(db.String, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     pricing_tier = db.Column(db.String, default='hobby', nullable=False)  # 'hobby' or 'enterprise'
+    role = db.Column(db.String, default='user', nullable=False)  # 'user', 'admin', etc.
 
     def __repr__(self):
         return f'<User {self.email}>'
@@ -118,13 +680,14 @@ class URL(db.Model):
 
 class APIKey(db.Model):
     __tablename__ = 'api_keys'
+
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    encrypted_key = db.Column(db.LargeBinary, unique=True, nullable=False)
+    encrypted_key = db.Column(db.LargeBinary, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    is_deleted = db.Column(db.Boolean, default=False)
-    deleted_at = db.Column(db.DateTime, nullable=True)
-
+    last_used_at = db.Column(db.DateTime, nullable=True)
+    is_active = db.Column(db.Boolean, default=True)
+    
     # Define the relationship with the User model
     user = db.relationship('User', backref=db.backref('api_keys', lazy=True))
     
@@ -137,10 +700,26 @@ class APIKey(db.Model):
     def key(self, value):
         """Encrypt and store the API key."""
         self.encrypted_key = encrypt_api_key(value)
-
-    def __repr__(self):
-        return f'<APIKey for user {self.user_id}>'
     
+    def __repr__(self):
+        return f'<APIKey {self.id}>'
+
+class RequestLog(db.Model):
+    __tablename__ = 'request_logs'
+    
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    method = db.Column(db.String(10), nullable=False)  # GET, POST, PUT, DELETE, etc.
+    url = db.Column(db.String(2048), nullable=False)   # Full URL including query parameters
+    path = db.Column(db.String(1024), nullable=False)  # URL path without query parameters
+    user_agent = db.Column(db.String(1024), nullable=True)
+    ip_address = db.Column(db.String(45), nullable=True)  # IPv4 or IPv6 address
+    status_code = db.Column(db.Integer, nullable=True)  # HTTP status code of the response
+    response_time = db.Column(db.Float, nullable=True)  # Response time in seconds
+    
+    def __repr__(self):
+        return f'<RequestLog {self.id} - {self.method} {self.path}>'
+
 def init_db():
     """Initialize the database with sample data."""
     # Create tables if they don't exist
@@ -291,12 +870,15 @@ def get_user_from_api_key(api_key):
     if not api_key:
         return None
     
-    # Since we can't directly query by the decrypted key, we need to fetch all non-deleted keys
+    # Since we can't directly query by the decrypted key, we need to fetch all active keys
     # and check each one
-    api_keys = APIKey.query.filter_by(is_deleted=False).all()
+    api_keys = APIKey.query.filter_by(is_active=True).all()
     for key_record in api_keys:
         try:
             if key_record.key == api_key:
+                # Update last_used_at timestamp
+                key_record.last_used_at = datetime.utcnow()
+                db.session.commit()
                 return key_record.user
         except Exception as e:
             # If decryption fails for any reason, skip this key
@@ -318,12 +900,8 @@ def analytics_page():
 @app.route('/shorten', methods=['POST'])
 def shorten_url():
     """Shorten a given URL and return the short code."""
-    # Get API key from request headers
-    api_key = request.headers.get('X-API-Key')
-    user = get_user_from_api_key(api_key)
-    
-    if not user:
-        return jsonify({'error': 'Invalid or missing API key'}), 401
+    # User is already validated and available in g.user thanks to the middleware
+    user = g.user
     
     # Use the refactored validation and creation function
     new_url, error = validate_and_create_url(request.json, user.id)
@@ -354,21 +932,16 @@ def shorten_url():
 
 @app.route('/shorten/batch', methods=['POST'])
 def shorten_urls_batch():
-    """Shorten multiple URLs in a single request."""
-    # Get API key from request headers
-    api_key = request.headers.get('X-API-Key')
-    user = get_user_from_api_key(api_key)
+    """Shorten multiple URLs in a single request.
     
-    if not user:
-        return jsonify({'error': 'Invalid or missing API key'}), 401
+    This endpoint allows enterprise tier users to create multiple short URLs in a single request.
+    It accepts a list of URL objects, each with the same parameters as the single URL endpoint.
     
-    # Check if the user has the enterprise tier
-    if user.pricing_tier != 'enterprise':
-        return jsonify({
-            'error': 'Access denied. Batch URL shortening is only available for enterprise tier users.',
-            'current_tier': user.pricing_tier,
-            'required_tier': 'enterprise'
-        }), 403
+    Enterprise tier authorization is handled by the validate_enterprise_tier middleware.
+    """
+    # User is already validated and available in g.user thanks to the middleware
+    # Enterprise tier validation is also handled by middleware
+    user = g.user
     
     # Get the list of URL data from the request
     urls_data = request.json.get('urls')
@@ -498,15 +1071,11 @@ def redirect_to_url():
     db.session.commit()
     return redirect(url.original_url)
 
-@app.route('/delete', methods=['DELETE'])
+@app.route('/delete', methods=['POST'])
 def delete_short_code():
     """Delete a short code from the database."""
-    # Get API key from request headers
-    api_key = request.headers.get('X-API-Key')
-    user = get_user_from_api_key(api_key)
-    
-    if not user:
-        return jsonify({'error': 'Invalid or missing API key'}), 401
+    # User is already validated and available in g.user thanks to the middleware
+    user = g.user
         
     short_code = request.args.get('code')
     if not short_code:
@@ -783,18 +1352,15 @@ def get_most_shortened_urls():
 def close_connection(exception):
     pass
 
-@app.route('/users/<int:user_id>/update-tier', methods=['PUT'])
-def update_user_tier(user_id):
+@app.route('/user/tier/update', methods=['POST'])
+def update_user_tier():
     """Update a user's pricing tier."""
-    # Get the API key from the request headers
-    api_key = request.headers.get('X-API-Key')
-    if not api_key:
-        return jsonify({'error': 'API key is required'}), 401
+    # User is already validated and available in g.user thanks to the middleware
+    admin_user = g.user
     
-    # Get the user from the API key
-    admin_user = get_user_from_api_key(api_key)
-    if not admin_user:
-        return jsonify({'error': 'Invalid API key'}), 401
+    # Additional check for enterprise tier
+    if admin_user.pricing_tier != 'enterprise':
+        return jsonify({'error': 'Unauthorized. This endpoint requires an enterprise API key.'}), 403
     
     # Get the request data
     data = request.get_json()
@@ -810,6 +1376,10 @@ def update_user_tier(user_id):
         return jsonify({'error': 'Invalid pricing tier. Must be either "hobby" or "enterprise".'}), 400
     
     # Get the user to update
+    user_id = data.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'User ID is required'}), 400
+    
     user = User.query.get(user_id)
     if not user:
         return jsonify({'error': 'User not found'}), 404
@@ -836,12 +1406,8 @@ def get_user_urls():
     Returns:
         Response: JSON response with the list of URLs
     """
-    # Get API key from request headers
-    api_key = request.headers.get('X-API-Key')
-    user = get_user_from_api_key(api_key)
-    
-    if not user:
-        return jsonify({'error': 'Invalid or missing API key'}), 401
+    # User is already validated and available in g.user thanks to the middleware
+    user = g.user
     
     # Get pagination parameters
     page = request.args.get('page', 1, type=int)
@@ -951,6 +1517,289 @@ def get_user_urls():
     }
     
     return jsonify(response)
+
+@app.route('/admin/logs', methods=['GET'])
+def view_request_logs():
+    """View request logs with optional filtering.
+    
+    Query parameters:
+    - path: Filter logs by path
+    - method: Filter logs by HTTP method
+    - status_code: Filter logs by status code
+    - ip: Filter logs by IP address
+    - start_date: Filter logs after this date (format: YYYY-MM-DD)
+    - end_date: Filter logs before this date (format: YYYY-MM-DD)
+    - limit: Maximum number of logs to return (default: 100)
+    - format: Response format ('json' or 'html', default: 'html')
+    """
+    # Get query parameters for filtering
+    path_filter = request.args.get('path')
+    method_filter = request.args.get('method')
+    status_filter = request.args.get('status_code')
+    ip_filter = request.args.get('ip')
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    limit = request.args.get('limit', 100, type=int)
+    format_type = request.args.get('format', 'html')
+    
+    # Read log file
+    logs = []
+    try:
+        log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', 'request_logs.log')
+        with open(log_file_path, 'r') as f:
+            for line in f:
+                try:
+                    # Parse log line
+                    if ' - IP: ' in line:
+                        # This is a request line
+                        timestamp_str = line.split(' - ', 1)[0]
+                        details = line.split(' - ', 1)[1].strip()
+                        
+                        # Extract information using regex
+                        ip_match = re.search(r'IP: ([\d\.]+)', details)
+                        method_match = re.search(r'Method: (\w+)', details)
+                        url_match = re.search(r'URL: ([^\|]+)', details)
+                        path_match = re.search(r'Path: ([^\|]+)', details)
+                        user_agent_match = re.search(r'User-Agent: ([^\|]+)', details)
+                        
+                        if ip_match and method_match and url_match:
+                            log_entry = {
+                                'timestamp': timestamp_str,
+                                'ip': ip_match.group(1).strip(),
+                                'method': method_match.group(1).strip(),
+                                'url': url_match.group(1).strip(),
+                                'path': path_match.group(1).strip() if path_match else '',
+                                'user_agent': user_agent_match.group(1).strip() if user_agent_match else '',
+                                'status_code': None,
+                                'response_time': None
+                            }
+                            logs.append(log_entry)
+                    elif ' - Response time: ' in line:
+                        # This is a response line, update the previous request
+                        if logs:
+                            timestamp_str = line.split(' - ', 1)[0]
+                            details = line.split(' - ', 1)[1].strip()
+                            
+                            response_time_match = re.search(r'Response time: ([\d\.]+)s', details)
+                            status_match = re.search(r'Status: (\d+)', details)
+                            
+                            if response_time_match and status_match and logs:
+                                logs[-1]['response_time'] = float(response_time_match.group(1))
+                                logs[-1]['status_code'] = int(status_match.group(1))
+                except Exception as e:
+                    logger.error(f"Error parsing log line: {str(e)}")
+                    continue
+    except Exception as e:
+        logger.error(f"Error reading log file: {str(e)}")
+        return jsonify({'error': 'Error reading log file'}), 500
+    
+    # Apply filters
+    filtered_logs = logs
+    
+    if path_filter:
+        filtered_logs = [log for log in filtered_logs if path_filter in log['path']]
+    
+    if method_filter:
+        filtered_logs = [log for log in filtered_logs if log['method'].upper() == method_filter.upper()]
+    
+    if status_filter:
+        status_code = int(status_filter)
+        filtered_logs = [log for log in filtered_logs if log['status_code'] == status_code]
+    
+    if ip_filter:
+        filtered_logs = [log for log in filtered_logs if ip_filter in log['ip']]
+    
+    if start_date:
+        try:
+            start_datetime = datetime.strptime(start_date, '%Y-%m-%d')
+            filtered_logs = [log for log in filtered_logs if datetime.strptime(log['timestamp'].split(',')[0], '%Y-%m-%d %H:%M:%S') >= start_datetime]
+        except ValueError:
+            pass
+    
+    if end_date:
+        try:
+            end_datetime = datetime.strptime(end_date, '%Y-%m-%d')
+            filtered_logs = [log for log in filtered_logs if datetime.strptime(log['timestamp'].split(',')[0], '%Y-%m-%d %H:%M:%S') <= end_datetime]
+        except ValueError:
+            pass
+    
+    # Sort logs by timestamp (newest first)
+    filtered_logs.reverse()
+    
+    # Limit the number of logs
+    filtered_logs = filtered_logs[:limit]
+    
+    # Return response in requested format
+    if format_type == 'json':
+        return jsonify({
+            'logs': filtered_logs,
+            'total': len(filtered_logs),
+            'filters': {
+                'path': path_filter,
+                'method': method_filter,
+                'status_code': status_filter,
+                'ip': ip_filter,
+                'start_date': start_date,
+                'end_date': end_date
+            }
+        })
+    else:
+        # HTML format
+        return render_template('logs.html', 
+                              logs=filtered_logs, 
+                              total=len(filtered_logs),
+                              filters={
+                                  'path': path_filter,
+                                  'method': method_filter,
+                                  'status_code': status_filter,
+                                  'ip': ip_filter,
+                                  'start_date': start_date,
+                                  'end_date': end_date
+                              })
+
+@app.route('/admin/blacklist', methods=['GET', 'POST'])
+def manage_blacklist():
+    """View and manage the blacklist."""
+    # Check if the user is an admin
+    if not hasattr(g, 'user') or g.user.role != 'admin':
+        return jsonify({'error': 'Access denied. Admin privileges required.'}), 403
+    
+    if request.method == 'POST':
+        try:
+            # Get the blacklist path
+            blacklist_path = get_blacklist_path()
+            
+            # Load the current blacklist
+            with open(blacklist_path, 'r') as f:
+                blacklist_data = json.load(f)
+            
+            # Update the blacklist based on the form data
+            action = request.form.get('action')
+            item_type = request.form.get('type')
+            value = request.form.get('value')
+            
+            if not action or not item_type or not value:
+                return jsonify({'error': 'Missing required fields'}), 400
+            
+            if item_type not in ['api_key', 'ip']:
+                return jsonify({'error': 'Invalid item type'}), 400
+            
+            if action == 'add':
+                # Add the item to the blacklist
+                if item_type == 'api_key':
+                    if value not in blacklist_data['blacklisted_api_keys']:
+                        blacklist_data['blacklisted_api_keys'].append(value)
+                else:  # ip
+                    if value not in blacklist_data['blacklisted_ips']:
+                        blacklist_data['blacklisted_ips'].append(value)
+            elif action == 'remove':
+                # Remove the item from the blacklist
+                if item_type == 'api_key':
+                    if value in blacklist_data['blacklisted_api_keys']:
+                        blacklist_data['blacklisted_api_keys'].remove(value)
+                else:  # ip
+                    if value in blacklist_data['blacklisted_ips']:
+                        blacklist_data['blacklisted_ips'].remove(value)
+            else:
+                return jsonify({'error': 'Invalid action'}), 400
+            
+            # Update the last_updated timestamp
+            blacklist_data['last_updated'] = datetime.utcnow().isoformat()
+            
+            # Save the updated blacklist
+            with open(blacklist_path, 'w') as f:
+                json.dump(blacklist_data, f, indent=2)
+            
+            # Force reload the blacklist
+            load_blacklist(force_reload=True)
+            
+            return jsonify({'success': True, 'message': f'{item_type} {action}ed successfully'}), 200
+        except Exception as e:
+            app.logger.error(f"Error updating blacklist: {str(e)}")
+            return jsonify({'error': f'Error updating blacklist: {str(e)}'}), 500
+    else:  # GET request
+        try:
+            # Get the blacklist path
+            blacklist_path = get_blacklist_path()
+            
+            # Load the blacklist
+            with open(blacklist_path, 'r') as f:
+                blacklist_data = json.load(f)
+            
+            # Render the blacklist management page
+            return render_template('blacklist.html', 
+                                 blacklist=blacklist_data,
+                                 last_updated=blacklist_data.get('last_updated', 'Unknown'))
+        except Exception as e:
+            app.logger.error(f"Error loading blacklist: {str(e)}")
+            return jsonify({'error': f'Error loading blacklist: {str(e)}'}), 500
+
+# Endpoint to view middleware timing statistics
+@app.route('/admin/middleware-stats', methods=['GET'])
+def middleware_stats():
+    """View middleware timing statistics."""
+    # Check if the user is an admin
+    if not hasattr(g, 'user') or g.user.role != 'admin':
+        return jsonify({'error': 'Access denied. Admin privileges required.'}), 403
+    
+    stats = {}
+    for middleware, times in middleware_timing.items():
+        if times:
+            stats[middleware] = {
+                'count': len(times),
+                'avg_ms': statistics.mean(times),
+                'min_ms': min(times),
+                'max_ms': max(times),
+                'median_ms': statistics.median(times),
+                'total_ms': sum(times)
+            }
+    
+    return jsonify({
+        'middleware_stats': stats,
+        'total_requests': len(middleware_timing.get('start_timer', [])),
+        'timestamp': datetime.utcnow().isoformat()
+    })
+
+# 8. Observability middleware - Track errors and exceptions
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Global exception handler for observability."""
+    # Get exception details
+    error_class = e.__class__.__name__
+    error_message = str(e)
+    stack_trace = traceback.format_exc()
+    
+    # Log the error
+    app.logger.error(f"Unhandled {error_class}: {error_message}\n{stack_trace}")
+    
+    # Send error to Datadog if enabled
+    if ENABLE_DATADOG:
+        # Create a span for the error
+        with tracer.trace('error', service=DATADOG_SERVICE) as span:
+            span.set_tag('error.type', error_class)
+            span.set_tag('error.message', error_message)
+            span.set_tag('error.stack', stack_trace)
+            span.error = 1
+            
+            # Increment error count metric
+            ddtrace.runtime.metrics.increment(
+                'url_shortener.errors',
+                tags=[
+                    f'error_type:{error_class}',
+                    f'path:{request.path}',
+                    f'method:{request.method}'
+                ]
+            )
+    
+    # Return a JSON response for API routes or HTML for web routes
+    if request.path.startswith('/api/') or request.headers.get('Accept') == 'application/json':
+        return jsonify({
+            'error': error_class,
+            'message': error_message,
+            'status_code': 500
+        }), 500
+    else:
+        return render_template('error.html', error=error_class, message=error_message), 500
 
 if __name__ == '__main__':
     with app.app_context():
