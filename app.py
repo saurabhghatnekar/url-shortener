@@ -566,6 +566,124 @@ def add_cors_headers(response):
     return response
 
 # Function to log request details to the database
+
+@app.route('/migration-guide', methods=['GET'])
+def migration_guide():
+    """Return the migration guide for upgrading from v1 to v2 (authentication required) as plain text."""
+    guide_text = '''# Migration Guide: Upgrading from v1 to v2 (Authentication Required)
+
+## Overview
+With the release of **v2.0.0**, API authentication is now required for all endpoints that modify or retrieve user-specific data. This guide will help you transition your integration from unauthenticated (v1) to authenticated (v2) usage.
+
+---
+
+## What’s Changed?
+- **API Key Required:**  All endpoints (except for public ones like `/health` and `/changelog`) now require an API key to be included in the request headers.
+- **User Management:**  Users must register and receive an API key before accessing protected endpoints.
+- **Backward Incompatible:**  Requests without a valid API key will result in a `401 Unauthorized` error.
+
+---
+
+## Steps to Migrate
+
+### 1. Register for an API Key
+- Use the `/users` endpoint to create a new user and receive your API key:
+  ```
+  POST /users
+  {
+    "email": "your-email@example.com",
+    "name": "Your Name"
+  }
+  ```
+- The response will include your API key.
+
+### 2. Update Your Requests
+- Add the following header to all requests to protected endpoints:
+  ```
+  X-API-Key: <your-api-key>
+  ```
+- Example using `curl`:
+  ```
+  curl -H "X-API-Key: <your-api-key>" http://localhost:5002/shorten
+  ```
+
+### 3. Identify Public vs Protected Endpoints
+- **Public (no auth required):**
+  - `/health`
+  - `/changelog`
+  - `/migration-guide`
+- **Protected (auth required):**
+  - `/shorten`
+  - `/shorten/batch`
+  - `/edit`
+  - `/delete`
+  - `/user/urls`
+  - `/analytics/*` (if user-specific)
+
+### 4. Error Handling
+- If you send a request without an API key, or with an invalid key, you will receive:
+  ```json
+  {
+    "error": "Invalid or missing API key"
+  }
+  ```
+  with HTTP status `401 Unauthorized`.
+
+### 5. Testing
+- Test your integration with the new authentication flow before the deprecation date for v1.
+
+---
+
+## Deprecation Timeline
+- **v1 Deprecation Notice:**  API v1 will be deprecated and removed on **2025-06-01**.
+- Warning headers will be sent in API responses for v1 usage:
+  ```
+  299 - API v1 is deprecated and will be removed on 2025-06-01
+  ```
+
+---
+
+## Need Help?
+If you need assistance migrating, contact our support team or consult the API documentation for more details.
+'''
+    return Response(guide_text, mimetype='text/plain')
+
+
+@app.route('/changelog', methods=['GET'])
+def changelog():
+    """Return the semantic versioning changelog as plain text."""
+    changelog_text = '''# Changelog
+
+**Migration Guide:** See [here](/migration-guide)
+
+## [2.1.0] – 2025-04-29
+### Added
+- Batch URL Shortening: Introduced `/shorten/batch` endpoint to allow creating multiple short URLs in a single request.
+- Password Protection: Added support for password-protected short URLs (creation, editing, and redirection).
+- Health Check Endpoint: Added `/health` endpoint for service status checks.
+
+### Changed
+- Edit Endpoint: Now supports adding/removing password protection on existing short codes.
+
+### Fixed
+- General bug fixes and improved error handling.
+
+---
+
+## [2.0.0] – 2025-03-15
+### Changed
+- Multiple Short Codes: Allowed multiple short codes for the same long URL.
+- Custom Short Codes: Added support for specifying custom short codes when creating URLs.
+- Edit Requests: Enabled edit requests on short codes.
+
+---
+
+## [1.0.0] – 2025-01-01
+### Added
+- Initial release: Basic URL shortening, redirection, and stats endpoints.
+'''
+    return Response(changelog_text, mimetype='text/plain')
+
 def log_request_to_db():
     """Log request details to the database."""
     # This function is called from log_request_info middleware
