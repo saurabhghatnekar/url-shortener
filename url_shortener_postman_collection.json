@@ -2,7 +2,7 @@
 	"info": {
 		"_postman_id": "b0d58127-692a-42b6-a787-763ba60ef896",
 		"name": "URL Shortener API",
-		"description": "A collection for testing the URL Shortener API with all available endpoints",
+		"description": "# URL Shortener API (v2)\n\nThis collection covers all endpoints for the latest version (v2) of the URL Shortener API.\n\n**Authentication:** Most endpoints require an API key. Add your API key to the `X-API-Key` header for all protected requests.\n\n**Migration:** If you are upgrading from v1, see the [Migration Guide](http://localhost:5002/migration-guide).\n\n**Changelog:** For recent changes, see the [Changelog](http://localhost:5002/changelog).\n\n**Key Endpoints:**\n- `/shorten`\n- `/shorten/batch`\n- `/edit`\n- `/delete`\n- `/user/urls`\n- `/analytics/*`\n- `/changelog` (public)\n- `/migration-guide` (public)\n\nFor more details, visit the documentation endpoints above.",
 		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 	},
 	"item": [
